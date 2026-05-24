@@ -1,0 +1,18 @@
+# Env and secrets
+.env
+.env.*
+!.env.example
+
+# ChromaDB data
+chroma_db/
+*.db
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# OS junk
+.DS_Store
+Thumbs.db

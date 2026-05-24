@@ -9,11 +9,6 @@ from app_logging import logger
 
 app = Flask(__name__)
 
-# --- CONFIGURATION SETTINGS ---
-# WASENDER_KEY = os.getenv("WASENDER_KEY") or "072215ca8c41fd167a13566ebfe729e5692e4f45d682140e444a1f7f3101accb"
-# GEMINI_KEY = os.getenv("GEMINI_KEY") or "AIzaSyD2oKg4WmQO7LfdMTmZ-f4UtT6TVJQEUCo"
-# INSTANCE_ID = os.getenv("INSTANCE_ID") or "SG-Bot-01#88031"
-
 from dotenv import load_dotenv
 load_dotenv()
 

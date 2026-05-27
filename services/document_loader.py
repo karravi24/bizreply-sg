@@ -5,7 +5,7 @@ from pypdf import PdfReader
 from docx import Document
 
 from app_logging import logger
-
+import pandas as pd
 from services.rag_service import add_document
 
 
@@ -61,6 +61,43 @@ def read_docx(file_path):
 
     return text
 
+# -----------------------------------
+# READ XLSX
+# -----------------------------------
+
+def read_xlsx(file_path):
+
+    text = ""
+
+    try:
+
+        excel_data = pd.read_excel(
+            file_path,
+            sheet_name=None
+        )
+
+        for sheet_name, df in excel_data.items():
+
+            text += f"\nSheet: {sheet_name}\n"
+
+            df = df.fillna("")
+
+            for row in df.values:
+
+                row_text = " | ".join(
+                    [str(cell) for cell in row]
+                )
+
+                text += row_text + "\n"
+
+    except Exception as e:
+
+        logger.exception(
+            "Error reading XLSX: %s",
+            e
+        )
+
+    return text
 
 # -----------------------------------
 # EXTRACT TEXT FROM FILE
@@ -99,6 +136,13 @@ def extract_text(file_path):
     elif ext == ".docx":
 
         return read_docx(file_path)
+
+    # -------------------------
+    # XLSX
+    # -------------------------
+    elif ext == ".xlsx":
+
+        return read_xlsx(file_path)
 
     # -------------------------
     # UNSUPPORTED
@@ -187,82 +231,49 @@ def process_file(
 # SCAN UPLOADS FOLDER
 # -----------------------------------
 
-def scan_uploads_folder():
+# -----------------------------------
+# SCAN UPLOADS FOLDER (Robust Version)
+# -----------------------------------
 
+def scan_uploads_folder():
     uploads_root = "uploads"
 
     if not os.path.exists(uploads_root):
-
-        logger.warning(
-            "uploads folder not found"
-        )
-
+        logger.warning("uploads folder not found")
         return
 
-    logger.info(
-        "Scanning uploads folder..."
-    )
+    logger.info("Scanning uploads folder...")
 
-    # -----------------------------------
-    # LOOP CUSTOMER FOLDERS
-    # -----------------------------------
+    # 1. Safely list all directories under uploads/
+    try:
+        customer_folders = [f for f in os.listdir(uploads_root) if os.path.isdir(os.path.join(uploads_root, f))]
+    except Exception as e:
+        logger.error("Failed to read uploads directory: %s", e)
+        return
 
-    customer_folders = glob.glob(
-        os.path.join(
-            uploads_root,
-            "*"
-        )
-    )
+    for customer_name in customer_folders:
+        customer_folder = os.path.join(uploads_root, customer_name)
+        logger.info("Customer folder: %s", customer_name)
 
-    for customer_folder in customer_folders:
+        # 2. Define valid matching extensions in lowercase
+        valid_extensions = {".pdf", ".docx", ".xlsx", ".txt", ".md"}
 
-        if not os.path.isdir(customer_folder):
-            continue
+        # 3. Read every physical file inside the folder regardless of case
+        try:
+            for filename in os.listdir(customer_folder):
+                file_path = os.path.join(customer_folder, filename)
+                
+                # Skip if it's a directory or a leftover temp file
+                if os.path.isdir(file_path) or filename.endswith('.tmp.txt'):
+                    continue
+                
+                # Extract the extension and force lowercase evaluation
+                ext = os.path.splitext(filename)[1].lower()
+                
+                if ext in valid_extensions:
+                    process_file(file_path, customer_name)
+                    
+        except Exception as e:
+            logger.error("Error reading folder contents for %s: %s", customer_name, e)
 
-        customer_name = os.path.basename(
-            customer_folder
-        )
-
-        logger.info(
-            "Customer folder: %s",
-            customer_name
-        )
-
-        # -----------------------------------
-        # FIND FILES
-        # -----------------------------------
-
-        patterns = [
-            "*.pdf",
-            "*.docx",
-            "*.txt",
-            "*.md"
-        ]
-
-        all_files = []
-
-        for pattern in patterns:
-
-            all_files.extend(
-                glob.glob(
-                    os.path.join(
-                        customer_folder,
-                        pattern
-                    )
-                )
-            )
-
-        # -----------------------------------
-        # PROCESS FILES
-        # -----------------------------------
-
-        for file_path in all_files:
-
-            process_file(
-                file_path,
-                customer_name
-            )
-
-    logger.info(
-        "Uploads folder scan completed"
-    )
+    logger.info("Uploads folder scan completed")

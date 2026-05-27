@@ -224,44 +224,62 @@ def add_document(
 def search_documents(
     query,
     customer_name="default_customer",
-    n_results=3
+    n_results=15
 ):
     """
-    Semantic search from ChromaDB
+    Hybrid search: Combines ChromaDB Semantic search with an exact keyword fallback.
     """
+    documents = []
 
+    # 1. KEYWORD FALLBACK SCANNER (Extremely accurate for model lookups like "iPhone 7")
     try:
+        import re
+        query_clean = query.lower()
+        # Filter out generic filler words to isolate key search terms (e.g., ["iphone", "7"])
+        ignore_words = {"what", "is", "the", "of", "price", "lcd", "og", "for", "in", "stock", "enquiry"}
+        keywords = [w for w in re.findall(r'\b\w+\b', query_clean) if w not in ignore_words and len(w) > 0]
 
-        query_embedding = embed_model.encode(
-            [query]
-        ).tolist()
+        if keywords:
+            # Look inside the exact customer directory for the generated text block
+            fallback_file = f"uploads/{customer_name}/Product_ohms.xlsx.tmp.txt"
+            if os.path.exists(fallback_file):
+                with open(fallback_file, "r", encoding="utf-8") as f:
+                    file_content = f.read()
+                    
+                # Split content into distinct rows
+                all_lines = [line.strip() for line in file_content.split("\n") if line.strip()]
+                
+                # Extract up to 5 rows that contain all key identifiers
+                for line in all_lines:
+                    if all(k in line.lower() for k in keywords):
+                        if line not in documents:
+                            documents.append(line)
+                        if len(documents) >= 5:
+                            break
+    except Exception as fallback_err:
+        logger.error("Keyword fallback scanner failed: %s", fallback_err)
 
+    # 2. SEMANTIC SEARCH (Runs safely without locking up on missing metadata tags)
+    try:
+        query_embedding = embed_model.encode([query]).tolist()
+
+        # Run query without strict metadata constraints to check broader scope
         results = collection.query(
             query_embeddings=query_embedding,
-            n_results=n_results,
-            where={
-                "customer": customer_name
-            }
+            n_results=n_results
         )
 
-        documents = []
-
-        if (
-            results
-            and results.get("documents")
-            and results["documents"][0]
-        ):
-            documents = results["documents"][0]
-
-        return documents
+        if results and results.get("documents") and results["documents"][0]:
+            for doc in results["documents"][0]:
+                if doc not in documents:
+                    documents.append(doc)
 
     except Exception as e:
-        logger.exception(
-            "Error searching documents: %s",
-            e
-        )
+        logger.exception("Error searching semantic documents: %s", e)
 
-        return []
+    # Return combined data up to your maximum request count
+    return documents[:n_results]
+
 
 
 # -----------------------------

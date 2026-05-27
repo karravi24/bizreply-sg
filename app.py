@@ -6,6 +6,8 @@ from functools import lru_cache
 from flask import Flask, request, jsonify
 from sentence_transformers import SentenceTransformer
 from app_logging import logger
+from services.rag_service import (search_documents, build_context)
+from services.document_loader import (scan_uploads_folder)
 
 app = Flask(__name__)
 
@@ -23,35 +25,37 @@ if not all([WASENDER_KEY, GEMINI_KEY, INSTANCE_ID]):
 
 logger.info("Starting bot successfully. Instance ID: %s", INSTANCE_ID)
 
+scan_uploads_folder()
+
 # 1. Load embedding model and vector DB once
-logger.info("Loading embedding model...")
-embed_model = SentenceTransformer("all-MiniLM-L6-v2")
-chroma_client = chromadb.PersistentClient(path="./chroma_db")
-collection = chroma_client.get_or_create_collection("business_docs")
-logger.info("ChromaDB loaded. Docs in collection: %d", collection.count())
+#logger.info("Loading embedding model...")
+#embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+#chroma_client = chromadb.PersistentClient(path="./chroma_db")
+#collection = chroma_client.get_or_create_collection("business_docs")
+#logger.info("ChromaDB loaded. Docs in collection: %d", collection.count())
 
-# 2. Run this once to load your docs into ChromaDB
-def load_docs():
-    logger.info("Loading docs from faq.md...")
-    if not os.path.exists("faq.md"):
-        logger.error("faq.md file not found! Skipping database pre-load.")
-        return
-
-    with open("faq.md", "r", encoding="utf-8") as f:
-        chunks = [c.strip() for c in f.read().split("\n\n") if c.strip()]
-
-    if chunks:
-        embeddings = embed_model.encode(chunks).tolist()
-        collection.add(
-            documents=chunks,
-            embeddings=embeddings,
-            ids=[f"doc_{i}" for i in range(len(chunks))]
-        )
-        logger.info("Added %d chunks to ChromaDB", len(chunks))
-
-# Auto-load if empty
-if collection.count() == 0:
-    load_docs()
+# # 2. Run this once to load your docs into ChromaDB
+# def load_docs():
+#     logger.info("Loading docs from faq.md...")
+#     if not os.path.exists("faq.md"):
+#         logger.error("faq.md file not found! Skipping database pre-load.")
+#         return
+#
+#     with open("faq.md", "r", encoding="utf-8") as f:
+#         chunks = [c.strip() for c in f.read().split("\n\n") if c.strip()]
+#
+#     if chunks:
+#         embeddings = embed_model.encode(chunks).tolist()
+#         collection.add(
+#             documents=chunks,
+#             embeddings=embeddings,
+#             ids=[f"doc_{i}" for i in range(len(chunks))]
+#         )
+#         logger.info("Added %d chunks to ChromaDB", len(chunks))
+#
+# # Auto-load if empty
+# if collection.count() == 0:
+#     load_docs()
 
 def call_gemini(system_prompt, user_msg):
     """Call Gemini with retry and token limits for speed."""
@@ -148,12 +152,13 @@ def webhook():
         logger.info("Processing Message from %s: %s", sender, user_msg)
 
         # 3. Retrieve context from ChromaDB - reduced to 1 chunk for speed
-        query_emb = embed_model.encode([user_msg]).tolist()
-        results = collection.query(query_embeddings=query_emb, n_results=1)
+        documents = search_documents(
+            query=user_msg,
+            customer_name="beesbuzz",
+            n_results=3
+        )
 
-        context = "No relevant context found."
-        if results and results.get('documents') and results['documents'][0]:
-            context = "\n".join(results['documents'][0])
+        context = build_context(documents)
 
         logger.info("Context retrieved: %s", context[:200])
 

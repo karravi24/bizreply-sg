@@ -9,56 +9,79 @@ from docx import Document
 from chromadb.api.types import EmbeddingFunction, Documents, Embeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from app_logging import logger
+from dotenv import load_dotenv
 
+load_dotenv()
+# -----------------------------
+# CONFIG
+# -----------------------------
 # -----------------------------
 # CONFIG
 # -----------------------------
 CHROMA_DB_PATH = "./chroma_db"
-COLLECTION_NAME = "business_docs_v4"
+COLLECTION_NAME = "business_docs_local_v1"  # New name to guarantee freshness
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 150
+
+
+logger.info("Using hardcoded local Gemini Key for verification.")
+
 
 GEMINI_KEY = os.getenv("GEMINI_KEY")
 if not GEMINI_KEY:
     logger.error("CRITICAL: GEMINI_KEY is missing from environment variables!")
     raise ValueError("GEMINI_KEY must be provided for cloud embedding functions.")
 
+
 # -----------------------------
 # CUSTOM NATIVE EMBEDDING FUNCTION
 # -----------------------------
+import requests
+from chromadb.api.types import Documents, Embeddings, EmbeddingFunction
+
+import requests
+import logging
+from typing import List
+
+logger = logging.getLogger(__name__)
+
 class CloudVectorGenerator(EmbeddingFunction):
-    """Custom embedding generator utilizing direct HTTP calls to Google's endpoints."""
+    """Custom embedding generator using Google Gemini embeddings."""
+
     def __init__(self, api_key: str):
         self.api_key = str(api_key).strip()
+        self.model = "models/gemini-embedding-001"
+        self.endpoint = f"https://generativelanguage.googleapis.com/v1beta/{self.model}:embedContent"
 
     def __call__(self, input_texts: Documents) -> Embeddings:
         embeddings = []
-        target_url = "https://googleapis.com"
         query_params = {"key": self.api_key}
-        
+
         for text in input_texts:
             payload = {
-                "model": "models/text-embedding-004",
-                "content": {"parts": [{"text": str(text)}]}
+                "model": self.model,
+                "content": {"parts": [{"text": str(text)}]},
+                "output_dimensionality": 768
             }
             try:
                 response = requests.post(
-                    target_url, 
-                    params=query_params, 
-                    json=payload, 
-                    timeout=15
+                    self.endpoint,
+                    params=query_params,
+                    json=payload,
+                    timeout=30
                 )
                 response.raise_for_status()
-                
-                vector = response.json()["embedding"]["values"]
+                data = response.json()
+                vector = data["embedding"]["values"]
                 embeddings.append(vector)
             except Exception as e:
                 logger.error("Cloud embedding API failure: %s", e)
-                embeddings.append([0.0] * 768) 
+                # Return zero vector to avoid breaking ChromaDB batch
+                embeddings.append([0.0] * 768)
         return embeddings
 
+
 logger.info("Initializing Native Cloud Vector Engine...")
-# ✅ FULLY FIXED: Instantiating the correct class name
 gemini_ef = CloudVectorGenerator(api_key=GEMINI_KEY)
 
 logger.info("Initializing ChromaDB Index Storage...")
@@ -71,12 +94,14 @@ logger.info("ChromaDB vector matrix connected successfully.")
 
 splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
 
+
 # -----------------------------
 # FILE READERS
 # -----------------------------
 def read_txt_md(file_path):
     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
         return f.read()
+
 
 def read_pdf(file_path):
     text = ""
@@ -89,6 +114,7 @@ def read_pdf(file_path):
         logger.exception("Error reading PDF %s: %s", file_path, e)
     return text
 
+
 def read_docx(file_path):
     text = ""
     try:
@@ -99,6 +125,7 @@ def read_docx(file_path):
     except Exception as e:
         logger.exception("Error reading DOCX %s: %s", file_path, e)
     return text
+
 
 def read_excel(file_path):
     text = ""
@@ -115,6 +142,7 @@ def read_excel(file_path):
         logger.exception("Error reading Excel %s: %s", file_path, e)
     return text
 
+
 def extract_text(file_path):
     ext = os.path.splitext(file_path)[1].lower()
     if ext in [".txt", ".md"]:
@@ -129,6 +157,7 @@ def extract_text(file_path):
         logger.warning("Unsupported file type: %s", ext)
         return ""
 
+
 # -----------------------------
 # UTILS
 # -----------------------------
@@ -141,9 +170,11 @@ def generate_file_hash(file_path):
             sha256.update(chunk)
     return sha256.hexdigest()
 
+
 def split_document(text):
     chunks = splitter.split_text(text)
     return [c.strip() for c in chunks if c.strip()]
+
 
 # -----------------------------
 # ADD DOCUMENT TO CHROMADB
@@ -156,7 +187,8 @@ def add_document(input_source, customer_name="default_customer", is_raw_text=Fal
                 logger.error("File not found: %s", input_source)
                 return False
             base_filename = os.path.basename(input_source)
-            source_identity = base_filename.replace(".tmp.txt", "") if base_filename.endswith(".tmp.txt") else base_filename
+            source_identity = base_filename.replace(".tmp.txt", "") if base_filename.endswith(
+                ".tmp.txt") else base_filename
             text = extract_text(input_source)
             file_hash = generate_file_hash(input_source)
         else:
@@ -178,9 +210,9 @@ def add_document(input_source, customer_name="default_customer", is_raw_text=Fal
 
         ids = [f"{customer_name}_{source_identity}_{i}" for i in range(len(chunks))]
         metadatas = [{
-            "source": source_identity, 
-            "customer": customer_name, 
-            "file_hash": file_hash, 
+            "source": source_identity,
+            "customer": customer_name,
+            "file_hash": file_hash,
             "chunk_index": i
         } for i in range(len(chunks))]
 
@@ -191,6 +223,7 @@ def add_document(input_source, customer_name="default_customer", is_raw_text=Fal
         logger.exception("Error writing data payload to index database layer: %s", e)
         return False
 
+
 # -----------------------------
 # SEARCH DOCUMENTS
 # -----------------------------
@@ -200,7 +233,8 @@ def search_documents(query, customer_name="default_customer", n_results=15):
 
     try:
         tokens = re.findall(r'\b\w+\b', query_clean)
-        filler_words = {"what", "is", "the", "of", "price", "details", "for", "in", "stock", "enquiry", "tell", "me", "pls", "please", "show", "check", "cost", "how", "much", "find", "list", "get", "with", "any"}
+        filler_words = {"what", "is", "the", "of", "price", "details", "for", "in", "stock", "enquiry", "tell", "me",
+                        "pls", "please", "show", "check", "cost", "how", "much", "find", "list", "get", "with", "any"}
         search_terms = [w for w in tokens if w not in filler_words and len(w) > 0]
 
         logger.info("Keyword search terms parsed: %s", search_terms)
@@ -225,7 +259,8 @@ def search_documents(query, customer_name="default_customer", n_results=15):
                     min_matches = 2 if len(search_terms) > 2 else 1
                     for doc in all_docs:
                         doc_lower = doc.lower()
-                        match_count = sum(1 for term in search_terms if re.search(r'\b' + re.escape(term) + r'\b', doc_lower))
+                        match_count = sum(
+                            1 for term in search_terms if re.search(r'\b' + re.escape(term) + r'\b', doc_lower))
                         if match_count >= min_matches:
                             documents.append(doc)
                         if len(documents) >= n_results:
@@ -239,18 +274,19 @@ def search_documents(query, customer_name="default_customer", n_results=15):
                 where={"customer": customer_name}
             )
             if vector_results and vector_results.get("documents"):
-                documents = vector_results["documents"][0] if isinstance(vector_results["documents"][0], list) else vector_results["documents"]
+                documents = vector_results["documents"][0] if isinstance(vector_results["documents"][0], list) else \
+                vector_results["documents"]
 
     except Exception as e:
         logger.exception("Error executing search queries across collection matrix: %s", e)
-        
+
     return documents
+
 
 def build_context(documents):
     if not documents:
         return "No relevant information found."
     return "\n".join(documents)
-
 
 
 def initialize_default_documents():
@@ -260,5 +296,6 @@ def initialize_default_documents():
         add_document(faq_path, customer_name="beesbuzz")
     else:
         logger.warning("faq.md not found. Skipping preload.")
+
 
 initialize_default_documents()

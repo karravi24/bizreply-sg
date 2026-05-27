@@ -101,43 +101,46 @@ def add_document(
     customer_name="default_customer"
 ):
     """
-    Load, chunk, embed, and store document
+    Load, chunk, embed, and store document with absolute duplication blocking.
     """
-
     try:
-
         logger.info("Processing file: %s", file_path)
 
         if not os.path.exists(file_path):
             logger.error("File not found: %s", file_path)
             return False
 
-        file_hash = generate_file_hash(file_path)
+        # Extract the true source filename (stripping out any temporary extension noise)
+        base_filename = os.path.basename(file_path)
+        if base_filename.endswith(".tmp.txt"):
+            source_identity = base_filename.replace(".tmp.txt", "")
+        else:
+            source_identity = base_filename
 
         # -----------------------------
-        # CHECK DUPLICATE
+        # ABSOLUTE DUPLICATE CHECK BY SOURCE FILENAME
         # -----------------------------
-
+        # This completely guarantees a file is indexed exactly once per client
         existing = collection.get(
-            where={"file_hash": file_hash}
+            where={"source": source_identity}
         )
 
-        if existing and existing.get("ids"):
+        if existing and existing.get("ids") and len(existing["ids"]) > 0:
             logger.info(
-                "Skipping duplicate file: %s",
-                file_path
+                "Skipping duplicate file (already indexed in vector DB): %s",
+                source_identity
             )
             return True
+
+        file_hash = generate_file_hash(file_path)
 
         # -----------------------------
         # LOAD CONTENT
         # -----------------------------
-
         ext = os.path.splitext(file_path)[1].lower()
 
         if ext in [".md", ".txt"]:
             text = load_text_file(file_path)
-
         else:
             logger.warning(
                 "Unsupported file type: %s",
@@ -152,7 +155,6 @@ def add_document(
         # -----------------------------
         # SPLIT INTO CHUNKS
         # -----------------------------
-
         chunks = split_document(text)
 
         logger.info(
@@ -163,29 +165,23 @@ def add_document(
         # -----------------------------
         # CREATE EMBEDDINGS
         # -----------------------------
-
-        embeddings = embed_model.encode(
-            chunks
-        ).tolist()
+        embeddings = embed_model.encode(chunks).tolist()
 
         # -----------------------------
-        # CREATE IDS
+        # CREATE UNIQUE IDS
         # -----------------------------
-
         ids = [
-            f"{file_hash}_{i}"
+            f"{customer_name}_{source_identity}_{i}"
             for i in range(len(chunks))
         ]
 
         # -----------------------------
-        # METADATA
+        # METADATA MAPPING
         # -----------------------------
-
         metadatas = []
-
         for i in range(len(chunks)):
             metadatas.append({
-                "source": os.path.basename(file_path),
+                "source": source_identity,
                 "customer": customer_name,
                 "file_hash": file_hash,
                 "chunk_index": i
@@ -194,7 +190,6 @@ def add_document(
         # -----------------------------
         # STORE IN CHROMADB
         # -----------------------------
-
         collection.add(
             documents=chunks,
             embeddings=embeddings,
@@ -203,18 +198,18 @@ def add_document(
         )
 
         logger.info(
-            "Successfully added document: %s",
-            file_path
+            "Successfully added document to Vector DB: %s",
+            source_identity
         )
-
         return True
 
     except Exception as e:
         logger.exception(
             "Error adding document: %s",
-            e
+            file_path
         )
         return False
+
 
 
 # -----------------------------

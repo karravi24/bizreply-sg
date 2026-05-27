@@ -1,295 +1,154 @@
 import os
-import glob
-
+import pandas as pd
 from pypdf import PdfReader
 from docx import Document
-
 from app_logging import logger
-import pandas as pd
 from services.rag_service import add_document
 
+CHUNK_SIZE = 1000 # characters per chunk
 
-# -----------------------------------
-# READ PDF
-# -----------------------------------
+def chunk_text(text, size=CHUNK_SIZE):
+    """Split text into chunks by paragraphs, not hard cut."""
+    chunks = []
+    buffer = ""
+    for para in text.split("\n\n"):
+        if len(buffer) + len(para) > size and buffer:
+            chunks.append(buffer.strip())
+            buffer = para
+        else:
+            buffer += "\n\n" + para
+    if buffer.strip():
+        chunks.append(buffer.strip())
+    return chunks
 
 def read_pdf(file_path):
-
     text = ""
-
     try:
-
         reader = PdfReader(file_path)
-
         for page in reader.pages:
             page_text = page.extract_text()
-
             if page_text:
                 text += page_text + "\n"
-
     except Exception as e:
-        logger.exception(
-            "Error reading PDF: %s",
-            e
-        )
-
+        logger.exception("Error reading PDF %s: %s", file_path, e)
     return text
-
-
-# -----------------------------------
-# READ DOCX
-# -----------------------------------
 
 def read_docx(file_path):
-
     text = ""
-
     try:
-
         doc = Document(file_path)
-
         for para in doc.paragraphs:
-
             if para.text.strip():
                 text += para.text + "\n"
-
     except Exception as e:
-        logger.exception(
-            "Error reading DOCX: %s",
-            e
-        )
-
+        logger.exception("Error reading DOCX %s: %s", file_path, e)
     return text
-
-# -----------------------------------
-# READ XLSX
-# -----------------------------------
 
 def read_xlsx(file_path):
-
     text = ""
-
     try:
-
-        excel_data = pd.read_excel(
-            file_path,
-            sheet_name=None
-        )
-
+        excel_data = pd.read_excel(file_path, sheet_name=None, dtype=str)
         for sheet_name, df in excel_data.items():
-
-            text += f"\nSheet: {sheet_name}\n"
-
             df = df.fillna("")
-
-            for row in df.values:
-
-                row_text = " | ".join(
-                    [str(cell) for cell in row]
-                )
-
-                text += row_text + "\n"
-
+            text += f"\nSheet: {sheet_name}\n"
+            for _, row in df.iterrows():
+                row_text = " | ".join([f"{col}: {val}" for col, val in row.items() if val])
+                if row_text:
+                    text += row_text + "\n"
     except Exception as e:
-
-        logger.exception(
-            "Error reading XLSX: %s",
-            e
-        )
-
+        logger.exception("Error reading XLSX %s: %s", file_path, e)
     return text
 
-# -----------------------------------
-# EXTRACT TEXT FROM FILE
-# -----------------------------------
-
 def extract_text(file_path):
-
     ext = os.path.splitext(file_path)[1].lower()
-
-    # -------------------------
-    # TXT / MD
-    # -------------------------
-
     if ext in [".txt", ".md"]:
-
-        with open(
-            file_path,
-            "r",
-            encoding="utf-8"
-        ) as f:
-
-            return f.read()
-
-    # -------------------------
-    # PDF
-    # -------------------------
-
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                return f.read()
+        except Exception as e:
+            logger.exception("Error reading TXT %s: %s", file_path, e)
+            return ""
     elif ext == ".pdf":
-
         return read_pdf(file_path)
-
-    # -------------------------
-    # DOCX
-    # -------------------------
-
     elif ext == ".docx":
-
         return read_docx(file_path)
-
-    # -------------------------
-    # XLSX
-    # -------------------------
     elif ext == ".xlsx":
-
         return read_xlsx(file_path)
-
-    # -------------------------
-    # UNSUPPORTED
-    # -------------------------
-
     else:
-
-        logger.warning(
-            "Unsupported file type: %s",
-            ext
-        )
-
+        logger.warning("Unsupported file type: %s", ext)
         return ""
 
-
-# -----------------------------------
-# PROCESS SINGLE FILE
-# -----------------------------------
-
-def process_file(
-    file_path,
-    customer_name
-):
+def process_file(file_path, customer_name):
     try:
-        logger.info(
-            "Processing upload file: %s",
-            file_path
-        )
+        logger.info("Processing upload file: %s", file_path)
 
-        # -------------------------------------------------------------
-        # PERMANENT FIX: CHECK PERSISTENT CONTAINER STATUS MARKER
-        # -------------------------------------------------------------
         status_dir = os.path.join("uploads", "processed_markers")
         os.makedirs(status_dir, exist_ok=True)
-
         filename = os.path.basename(file_path)
         marker_path = os.path.join(status_dir, f"{customer_name}_{filename}.done")
 
         if os.path.exists(marker_path):
-            logger.info("--> [FAST SKIP] File already processed in this container lifecycle: %s", filename)
+            logger.info("--> [FAST SKIP] Already processed: %s", filename)
             return True
 
         text = extract_text(file_path)
-
         if not text.strip():
-            logger.warning(
-                "No text extracted from: %s",
-                file_path
-            )
+            logger.warning("No text extracted from: %s", file_path)
             return False
 
-        # -------------------------
-        # TEMP TEXT FILE
-        # -------------------------
-        temp_path = file_path + ".tmp.txt"
+        chunks = chunk_text(text)
+        success = True
 
-        with open(
-            temp_path,
-            "w",
-            encoding="utf-8"
-        ) as f:
-            f.write(text)
+        for i, chunk in enumerate(chunks):
+            temp_path = f"{file_path}.chunk_{i}.tmp.txt"
+            with open(temp_path, "w", encoding="utf-8") as f:
+                f.write(chunk)
 
-        # -------------------------
-        # ADD TO VECTOR DB
-        # -------------------------
-        result = add_document(
-            temp_path,
-            customer_name=customer_name
-        )
+            result = add_document(temp_path, customer_name=customer_name)
+            if not result:
+                success = False
 
-        # -------------------------------------------------------------
-        # IF ADDED SUCCESSFULLY, LOCK THE STATUS MARKER ON DISK
-        # -------------------------------------------------------------
-        if result:
+            # Delete temp unless it's Excel and you want to keep it
+            if not (file_path.endswith(('.xlsx', '.xls')) and os.path.exists(temp_path)):
+                os.remove(temp_path)
+
+        if success:
             with open(marker_path, "w", encoding="utf-8") as marker:
                 marker.write("done")
 
-        # -------------------------------------------------------------
-        # HIERARCHY CLEANUP
-        # -------------------------------------------------------------
-        # Delete PDF/Word temps, but KEEP Excel text logs for our keyword search engine fallback
-        if os.path.exists(temp_path):
-            if filename.endswith(('.xlsx', '.xls')):
-                logger.info("Keeping Excel text dump for keyword search: %s", temp_path)
-            else:
-                os.remove(temp_path)
-
-        return result
+        return success
 
     except Exception as e:
-        logger.exception(
-            "Error processing file: %s",
-            file_path
-        )
+        logger.exception("Error processing file: %s", file_path)
         return False
-
-
-
-
-# -----------------------------------
-# SCAN UPLOADS FOLDER
-# -----------------------------------
-
-# -----------------------------------
-# SCAN UPLOADS FOLDER (Robust Version)
-# -----------------------------------
 
 def scan_uploads_folder():
     uploads_root = "uploads"
-
     if not os.path.exists(uploads_root):
         logger.warning("uploads folder not found")
         return
 
     logger.info("Scanning uploads folder...")
+    valid_extensions = {".pdf", ".docx", ".xlsx", ".txt", ".md"}
 
-    # 1. Safely list all directories under uploads/
     try:
-        customer_folders = [f for f in os.listdir(uploads_root) if os.path.isdir(os.path.join(uploads_root, f))]
+        customer_folders = [f for f in os.listdir(uploads_root)
+                            if os.path.isdir(os.path.join(uploads_root, f))]
     except Exception as e:
         logger.error("Failed to read uploads directory: %s", e)
         return
 
     for customer_name in customer_folders:
         customer_folder = os.path.join(uploads_root, customer_name)
-        logger.info("Customer folder: %s", customer_name)
-
-        # 2. Define valid matching extensions in lowercase
-        valid_extensions = {".pdf", ".docx", ".xlsx", ".txt", ".md"}
-
-        # 3. Read every physical file inside the folder regardless of case
         try:
             for filename in os.listdir(customer_folder):
                 file_path = os.path.join(customer_folder, filename)
-                
-                # Skip if it's a directory or a leftover temp file
                 if os.path.isdir(file_path) or filename.endswith('.tmp.txt'):
                     continue
-                
-                # Extract the extension and force lowercase evaluation
                 ext = os.path.splitext(filename)[1].lower()
-                
                 if ext in valid_extensions:
                     process_file(file_path, customer_name)
-                    
         except Exception as e:
-            logger.error("Error reading folder contents for %s: %s", customer_name, e)
+            logger.error("Error reading folder %s: %s", customer_name, e)
 
     logger.info("Uploads folder scan completed")

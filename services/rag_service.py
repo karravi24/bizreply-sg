@@ -12,7 +12,7 @@ from app_logging import logger
 # CONFIG
 # -----------------------------
 CHROMA_DB_PATH = "./chroma_db"
-COLLECTION_NAME = "business_docs"
+COLLECTION_NAME = "business_docs_v3"
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 150
 
@@ -128,8 +128,28 @@ def add_document(file_path, customer_name="default_customer"):
             logger.warning("Empty document: %s", file_path)
             return False
 
-        chunks = split_document(text)
-        logger.info("Generated %d chunks for %s", len(chunks), source_identity)
+        # -------------------------------------------------------------
+        # ABSOLUTE FIX: FORCE STRICT ROW ISOLATION FOR SPREADSHEETS
+        # -------------------------------------------------------------
+        # Check if the text content looks like Excel data matrix rows
+        if "Product:" in text or source_identity.endswith(('.xlsx', '.xls', '.csv')):
+            # Split clean single text lines by ignoring table headers and structural sheet tags
+            raw_lines = text.split("\n")
+            chunks = []
+            for line in raw_lines:
+                clean_line = line.strip()
+                # Check for explicit data flags and throw away unpopulated structures
+                if clean_line and "Product:" in clean_line:
+                    chunks.append(clean_line)
+            logger.info("Excel Processing: Split text cleanly into %d single product rows.", len(chunks))
+        else:
+            # Fallback to general semantic chunks for standard documents and text assets
+            chunks = split_document(text)
+            logger.info("Generated %d generic chunks for text document: %s", len(chunks), source_identity)
+
+        if not chunks:
+            logger.warning("No discrete chunks generated for: %s", file_path)
+            return False
 
         embeddings = embed_model.encode(chunks).tolist()
         ids = [f"{customer_name}_{source_identity}_{i}" for i in range(len(chunks))]
@@ -147,6 +167,7 @@ def add_document(file_path, customer_name="default_customer"):
         logger.exception("Error adding document: %s", file_path)
         return False
 
+
 # -----------------------------
 # SEARCH DOCUMENTS
 # -----------------------------
@@ -154,30 +175,52 @@ def search_documents(query, customer_name="default_customer", n_results=15):
     documents = []
     query_clean = query.lower()
 
-    # Keyword fallback only if vector search fails
+    # Keyword fallback with strict word-boundary matching
     try:
         import re
         tokens = re.findall(r'\b\w+\b', query_clean)
         filler_words = {"what", "is", "the", "of", "price", "details", "for", "in", "stock", "enquiry", "tell", "me", "pls", "please", "show", "check", "cost", "how", "much", "find", "list", "get", "with", "any"}
-        search_terms = [w for w in tokens if w not in filler_words and len(w) > 1]
+        search_terms = [w for w in tokens if w not in filler_words and len(w) > 0] # Changed len > 0 to catch single numbers like '7'
+
+        logger.info("Keyword search terms: %s", search_terms)
 
         if search_terms:
             results = collection.get(where={"customer": customer_name})
             if results and results.get("documents"):
-                for doc in results["documents"]:
+                all_docs = results["documents"]
+
+                # First pass: match ALL terms as whole distinct words
+                strict_matches = []
+                for doc in all_docs:
                     doc_lower = doc.lower()
-                    if all(term in doc_lower for term in search_terms):
-                        documents.append(doc)
-                    if len(documents) >= 6:
+                    # \b ensures complete standalone word matching (skips substrings like A1387)
+                    if all(re.search(r'\b' + re.escape(term) + r'\b', doc_lower) for term in search_terms):
+                        strict_matches.append(doc)
+                    if len(strict_matches) >= 6:
                         break
+
+                if strict_matches:
+                    logger.info("Found %d strict matches for terms %s", len(strict_matches), search_terms)
+                    documents.extend(strict_matches)
+                else:
+                    # Fallback: match at least 2 terms, or 1 if query is short (using word boundaries)
+                    min_matches = 2 if len(search_terms) > 2 else 1
+                    for doc in all_docs:
+                        doc_lower = doc.lower()
+                        match_count = sum(1 for term in search_terms if re.search(r'\b' + re.escape(term) + r'\b', doc_lower))
+                        if match_count >= min_matches:
+                            documents.append(doc)
+                        if len(documents) >= 6:
+                            break
+                    logger.info("No strict match. Using fallback with min %d matches, got %d docs", min_matches, len(documents))
     except Exception as e:
         logger.error("Keyword fallback failed: %s", e)
 
-    # Vector search
+    # Vector search - backfill and deduplicate remaining positions
     try:
         query_embedding = embed_model.encode([query]).tolist()
         results = collection.query(query_embeddings=query_embedding, n_results=n_results, where={"customer": customer_name})
-        if results and results.get("documents"):
+        if results and results.get("documents") and results["documents"][0]:
             for doc in results["documents"][0]:
                 if doc and doc not in documents:
                     documents.append(doc)
@@ -185,6 +228,7 @@ def search_documents(query, customer_name="default_customer", n_results=15):
         logger.exception("Error searching semantic documents: %s", e)
 
     return documents[:n_results]
+
 
 def build_context(documents):
     return "\n\n".join(documents) if documents else "No relevant information found."

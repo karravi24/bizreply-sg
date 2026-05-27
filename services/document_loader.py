@@ -5,7 +5,7 @@ from docx import Document
 from app_logging import logger
 from services.rag_service import add_document
 
-CHUNK_SIZE = 1000 # characters per chunk
+CHUNK_SIZE = 1000
 
 def chunk_text(text, size=CHUNK_SIZE):
     """Split text into chunks by paragraphs, not hard cut."""
@@ -44,20 +44,57 @@ def read_docx(file_path):
         logger.exception("Error reading DOCX %s: %s", file_path, e)
     return text
 
+def row_to_text(row_dict):
+    """Convert Excel row dict to searchable natural text"""
+    title = row_dict.get('title', '').strip()
+    product_name = row_dict.get('product_name', '').strip()
+    brand = row_dict.get('brand_name', '').strip()
+    sales = row_dict.get('Sales_price', '').strip()
+    repair = row_dict.get('repair_price', '').strip()
+    qty = row_dict.get('qty', '').strip()
+    model = row_dict.get('model_number', '').strip()
+    suitable = row_dict.get('suitable_model', '').strip()
+    desc = row_dict.get('product_description', '').strip()
+
+    # Use title or product_name, whichever exists
+    name = product_name or title
+    if not name:
+        return ""
+
+    return (
+        f"Product: {name}. "
+        f"Brand: {brand}. "
+        f"Sales Price: {sales}. "
+        f"Repair Price: {repair}. "
+        f"Stock: {qty}. "
+        f"Model: {model}. "
+        f"Compatible Models: {suitable}. "
+        f"Description: {desc}."
+    )
+
 def read_xlsx(file_path):
-    text = ""
+    chunks = []
     try:
         excel_data = pd.read_excel(file_path, sheet_name=None, dtype=str)
         for sheet_name, df in excel_data.items():
             df = df.fillna("")
-            text += f"\nSheet: {sheet_name}\n"
+            df.columns = [str(c).strip() for c in df.columns]
+
+            logger.info("Excel columns found: %s", list(df.columns))
+
             for _, row in df.iterrows():
-                row_text = " | ".join([f"{col}: {val}" for col, val in row.items() if val])
-                if row_text:
-                    text += row_text + "\n"
+                text_row = row_to_text(row.to_dict())
+                if text_row:
+                    chunks.append(text_row)
+
     except Exception as e:
         logger.exception("Error reading XLSX %s: %s", file_path, e)
-    return text
+
+    result = "\n\n".join(chunks)
+    logger.info("Extracted %d rows from Excel", len(chunks))
+    if chunks:
+        logger.info("Preview: %s", chunks[0][:200])
+    return result
 
 def extract_text(file_path):
     ext = os.path.splitext(file_path)[1].lower()
@@ -107,10 +144,7 @@ def process_file(file_path, customer_name):
             result = add_document(temp_path, customer_name=customer_name)
             if not result:
                 success = False
-
-            # Delete temp unless it's Excel and you want to keep it
-            if not (file_path.endswith(('.xlsx', '.xls')) and os.path.exists(temp_path)):
-                os.remove(temp_path)
+            os.remove(temp_path)
 
         if success:
             with open(marker_path, "w", encoding="utf-8") as marker:

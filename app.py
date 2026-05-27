@@ -155,7 +155,7 @@ def webhook():
         documents = search_documents(
             query=user_msg,
             customer_name="beesbuzz",
-            n_results=3
+            n_results=20
         )
 
         context = build_context(documents)

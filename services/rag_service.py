@@ -240,58 +240,68 @@ def search_documents(
     n_results=15
 ):
     """
-    Hybrid search: Combines ChromaDB Semantic search with an exact keyword fallback.
+    Hybrid search: Intercepts lookups with an absolute keyword scan 
+    before merging with ChromaDB semantic options.
     """
     documents = []
 
-    # 1. KEYWORD FALLBACK SCANNER (Extremely accurate for model lookups like "iPhone 7")
+    # -------------------------------------------------------------
+    # LAYER 1: EXACT KEYWORD INTERSECTION SCANNER
+    # -------------------------------------------------------------
     try:
         import re
         query_clean = query.lower()
-        # Filter out generic filler words to isolate key search terms (e.g., ["iphone", "7"])
+        
+        # Strip generic filler words to extract true searchable targets
         ignore_words = {"what", "is", "the", "of", "price", "lcd", "og", "for", "in", "stock", "enquiry"}
         keywords = [w for w in re.findall(r'\b\w+\b', query_clean) if w not in ignore_words and len(w) > 0]
 
         if keywords:
-            # Look inside the exact customer directory for the generated text block
+            # Point to the exact generated data asset
             fallback_file = f"uploads/{customer_name}/Product_ohms.xlsx.tmp.txt"
-            if os.path.exists(fallback_file):
-                with open(fallback_file, "r", encoding="utf-8") as f:
-                    file_content = f.read()
-                    
-                # Split content into distinct rows
-                all_lines = [line.strip() for line in file_content.split("\n") if line.strip()]
+            
+            # If the primary file was cleared, scan the raw uploads folder fallback alternative
+            if not os.path.exists(fallback_file):
+                fallback_file = f"uploads/{customer_name}/Product_ohms.xlsx"
                 
-                # Extract up to 5 rows that contain all key identifiers
+            if os.path.exists(fallback_file) and not fallback_file.endswith('.xlsx'):
+                with open(fallback_file, "r", encoding="utf-8") as f:
+                    all_lines = f.readlines()
+                
+                # Match rows containing ALL key terms (e.g., must contain BOTH 'iphone' and '7')
                 for line in all_lines:
-                    if all(k in line.lower() for k in keywords):
-                        if line not in documents:
-                            documents.append(line)
-                        if len(documents) >= 5:
+                    line_clean = line.strip()
+                    if line_clean and all(k in line_clean.lower() for k in keywords):
+                        if line_clean not in documents:
+                            documents.append(line_clean)
+                        if len(documents) >= 5: # Capture up to 5 strict rows
                             break
     except Exception as fallback_err:
-        logger.error("Keyword fallback scanner failed: %s", fallback_err)
+        logger.error("Keyword intersection scanner failed: %s", fallback_err)
 
-    # 2. SEMANTIC SEARCH (Runs safely without locking up on missing metadata tags)
+    # -------------------------------------------------------------
+    # LAYER 2: CHROMADB SEMANTIC VECTOR SEARCH
+    # -------------------------------------------------------------
     try:
         query_embedding = embed_model.encode([query]).tolist()
 
-        # Run query without strict metadata constraints to check broader scope
+        # Query broader scope database matches safely
         results = collection.query(
             query_embeddings=query_embedding,
             n_results=n_results
         )
 
-        if results and results.get("documents") and results["documents"][0]:
-            for doc in results["documents"][0]:
-                if doc not in documents:
+        if results and results.get("documents") and results["documents"]:
+            # ChromaDB shapes results nested inside an outer list index
+            target_pool = results["documents"][0] if isinstance(results["documents"][0], list) else results["documents"]
+            for doc in target_pool:
+                if isinstance(doc, str) and doc not in documents:
                     documents.append(doc)
-
     except Exception as e:
         logger.exception("Error searching semantic documents: %s", e)
 
-    # Return combined data up to your maximum request count
     return documents[:n_results]
+
 
 
 

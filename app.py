@@ -163,17 +163,16 @@ def webhook():
         logger.info("Context retrieved: %s", context[:200])
 
         system_prompt = f"""
-        You are a concise WhatsApp assistant for BEESBUZZ Store.
-        Use ONLY the info below..
+        You are a WhatsApp assistant for BEESBUZZ Store.
+        Use ONLY the info below. Output the full answer exactly as written in Context.
 
         Context:
         {context}
 
-         Rules:
-        - Your entire response MUST be extremely brief: maximum 4 to 5 lines total.
-        - Condense the answer from Context into a tight, short summary.
-        - Use 1 emoji max.
-        - Do not add anything not in Context.
+        Rules:
+        - Copy the complete answer from Context, do not shorten
+        - Do not add anything not in Context
+        - Use 1 emoji max
         - If answer not in Context, reply: "I’ll check and get back to you"
         """
 

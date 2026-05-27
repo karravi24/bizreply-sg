@@ -30,31 +30,39 @@ if not GEMINI_KEY:
 class DirectGeminiEmbeddingFunction(EmbeddingFunction):
     """Custom embedding generator utilizing direct HTTP calls to Gemini API."""
     def __init__(self, api_key: str):
-        # Strip out any newline spaces or hidden characters from your env config
-        self.api_key = api_key.strip()
-        # Clean URL target configuration without template suffix injections
-        self.url = "https://googleapis.com"
+        # Cleanly isolate the key string
+        self.api_key = str(api_key).strip()
 
     def __call__(self, input_texts: Documents) -> Embeddings:
         embeddings = []
-        # Explicit query dictionary separation protects against host boundary contamination
-        params = {"key": self.api_key}
+        
+        # Hardcoding the exact URL layout directly in the sender loop guarantees no string overwrites
+        target_url = "https://googleapis.com"
+        query_params = {"key": self.api_key}
         
         for text in input_texts:
             payload = {
                 "model": "models/text-embedding-004",
-                "content": {"parts": [{"text": text}]}
+                "content": {"parts": [{"text": str(text)}]}
             }
             try:
-                # Pass params as a separate object parameter block
-                response = requests.post(self.url, params=params, json=payload, timeout=15)
+                # Issue the raw HTTP request with explicit params separation
+                response = requests.post(
+                    target_url, 
+                    params=query_params, 
+                    json=payload, 
+                    timeout=15
+                )
                 response.raise_for_status()
+                
                 vector = response.json()["embedding"]["values"]
                 embeddings.append(vector)
             except Exception as e:
                 logger.error("Gemini embedding failure: %s", e)
+                # Fallback zero-vector keeps database alignment safe if a row glitches
                 embeddings.append([0.0] * 768) 
         return embeddings
+
 
 
 logger.info("Initializing Native Gemini Cloud Embedding Engine...")

@@ -17,3 +17,5 @@ langgraph-sdk==0.3.15
 langsmith==0.8.5
 pypdf==6.12.2
 python-docx>=1.1.0
+pandas>=2.0.0
+openpyxl>=3.1.0

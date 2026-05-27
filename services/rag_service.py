@@ -240,67 +240,82 @@ def search_documents(
     n_results=15
 ):
     """
-    Hybrid search: Intercepts lookups with an absolute keyword scan 
-    before merging with ChromaDB semantic options.
+    Completely generic, brand-agnostic hybrid scanner.
+    Works for any phone, model number, or component variation automatically.
     """
     documents = []
+    query_clean = query.lower()
 
     # -------------------------------------------------------------
-    # LAYER 1: EXACT KEYWORD INTERSECTION SCANNER
+    # LAYER 1: DYNAMIC KEYWORD INTERSECTION FILTER
     # -------------------------------------------------------------
     try:
         import re
-        query_clean = query.lower()
+        # Isolate alphanumeric clusters (e.g. "iPhone 7 LCD" -> ["iphone", "7", "lcd"])
+        raw_tokens = re.findall(r'\b\w+\b', query_clean)
         
-        # Strip generic filler words to extract true searchable targets
-        ignore_words = {"what", "is", "the", "of", "price", "lcd", "og", "for", "in", "stock", "enquiry"}
-        keywords = [w for w in re.findall(r'\b\w+\b', query_clean) if w not in ignore_words and len(w) > 0]
+        # Comprehensive language noise baseline filter
+        filler_words = {
+            "what", "is", "the", "of", "price", "details", "for", "in", 
+            "stock", "enquiry", "tell", "me", "pls", "please", "show", 
+            "check", "cost", "how", "much", "find", "list", "get", "with", "any"
+        }
+        
+        # Extract only the critical unique keywords typed by the client
+        search_terms = [w for w in raw_tokens if w not in filler_words and len(w) > 0]
 
-        if keywords:
-            # Point to the exact generated data asset
-            fallback_file = f"uploads/{customer_name}/Product_ohms.xlsx.tmp.txt"
-            
-            # If the primary file was cleared, scan the raw uploads folder fallback alternative
-            if not os.path.exists(fallback_file):
-                fallback_file = f"uploads/{customer_name}/Product_ohms.xlsx"
-                
-            if os.path.exists(fallback_file) and not fallback_file.endswith('.xlsx'):
-                with open(fallback_file, "r", encoding="utf-8") as f:
-                    all_lines = f.readlines()
-                
-                # Match rows containing ALL key terms (e.g., must contain BOTH 'iphone' and '7')
+        fallback_file = f"uploads/{customer_name}/Product_ohms.xlsx.tmp.txt"
+        if os.path.exists(fallback_file) and search_terms:
+            with open(fallback_file, "r", encoding="utf-8") as f:
+                all_lines = [line.strip() for line in f.readlines() if line.strip()]
+
+            # 1. Match rows that intersect with ALL user-provided identifiers
+            for line in all_lines:
+                line_lower = line.lower()
+                if all(term in line_lower for term in search_terms):
+                    if line not in documents:
+                        documents.append(line)
+                if len(documents) >= 6:
+                    break
+
+            # 2. Match rows intersecting with MOST identifiers if an exact match is empty
+            if not documents:
+                # Require at least 2 identifiers to match to avoid irrelevant rows
+                required_match_count = max(2, len(search_terms) - 1) if len(search_terms) > 1 else 1
                 for line in all_lines:
-                    line_clean = line.strip()
-                    if line_clean and all(k in line_clean.lower() for k in keywords):
-                        if line_clean not in documents:
-                            documents.append(line_clean)
-                        if len(documents) >= 5: # Capture up to 5 strict rows
-                            break
+                    line_lower = line.lower()
+                    matches = sum(1 for term in search_terms if term in line_lower)
+                    if matches >= required_match_count:
+                        if line not in documents:
+                            documents.append(line)
+                    if len(documents) >= 5:
+                        break
+                        
     except Exception as fallback_err:
-        logger.error("Keyword intersection scanner failed: %s", fallback_err)
+        logger.error("Dynamic keyword parser failed: %s", fallback_err)
 
     # -------------------------------------------------------------
-    # LAYER 2: CHROMADB SEMANTIC VECTOR SEARCH
+    # LAYER 2: CHROMADB VECTOR BACKFILL
     # -------------------------------------------------------------
     try:
         query_embedding = embed_model.encode([query]).tolist()
-
-        # Query broader scope database matches safely
         results = collection.query(
             query_embeddings=query_embedding,
             n_results=n_results
         )
 
         if results and results.get("documents") and results["documents"]:
-            # ChromaDB shapes results nested inside an outer list index
+            # Safely loop through and flatten ChromaDB's matrix array block
             target_pool = results["documents"][0] if isinstance(results["documents"][0], list) else results["documents"]
             for doc in target_pool:
-                if isinstance(doc, str) and doc not in documents:
-                    documents.append(doc)
+                if doc and str(doc) not in documents:
+                    documents.append(str(doc))
+                    
     except Exception as e:
         logger.exception("Error searching semantic documents: %s", e)
 
     return documents[:n_results]
+
 
 
 

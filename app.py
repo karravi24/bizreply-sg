@@ -54,27 +54,29 @@ def call_gemini(system_prompt, user_msg):
     return None
 
 @lru_cache(maxsize=200)
-def get_cached_reply(user_msg, context_hash):
-    """
-    Cache only on user_msg + context hash, not full context.
-    This prevents memory bloat and increases cache hits.
-    """
+def get_cached_reply(user_msg, context):
+    # Trim context to avoid 400 errors. Gemini 2.5 Flash has ~1M token limit,
+    # but long prompts still cause 400 if malformed
+    max_chars = 8000
+    if len(context) > max_chars:
+        context = context[:max_chars] + "\n...truncated"
+
     system_prompt = f"""
     You are a precise WhatsApp assistant for BEESBUZZ Store answering stock/price checks.
-    The customer is asking about a specific phone model (e.g., iPhone 7).
     Use ONLY the data in Context. Each product is formatted as columns separated by '|'.
 
     Context:
-    {context_hash}
+    {context}
 
     Columns map to: [ID | Store | Product Name | Barcode | Sales Price | Purchase Price | Repair Price | Qty | Brand | Desc | Model # | Suitable Models]
 
     Rules:
-    - CRITICAL: Check the model number carefully. If the customer asks for "iPhone 7" but the Context ONLY shows other models like "iPhone 14" or "iPhone 13", you MUST consider this a mismatch.
-    - If the exact model requested by the customer is completely missing from the Context data, reply ONLY: "I’ll check and get back to you."
-    - If the model matches perfectly, reply horizontally on 1 or 2 lines maximum using this exact format:
+    - If the exact model requested is missing from Context, reply ONLY: "I’ll check and get back to you."
+    - If the model matches, reply in 1-2 lines:
       📦 *[Product Name]* | 💰 Price: $[Sales Price] (Repair: $[Repair Price]) | Stock: [Qty]
     """
+    logger.info("Context length: %d", len(context))
+    logger.info("Context preview: %s", context[:300]) # first 300 chars only
     return call_gemini(system_prompt, user_msg)
 
 def send_whatsapp_async(sender, reply):
@@ -131,12 +133,10 @@ def webhook():
         documents = search_documents(query=user_msg, customer_name="beesbuzz", n_results=10)
         context = build_context(documents)
 
-        if not documents or context == "No relevant information found.":
+        if not documents or not context.strip() or context == "No relevant information found.":
             reply = "I’ll check and get back to you."
         else:
-            # Use hash of context for caching, not full text
-            context_hash = str(hash(context))
-            reply = get_cached_reply(user_msg, context_hash)
+            reply = get_cached_reply(user_msg, context)
             if not reply:
                 reply = "I’ll check and get back to you."
 

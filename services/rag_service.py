@@ -1,10 +1,11 @@
 import os
 import hashlib
+import re
 import chromadb
 import pandas as pd
 from pypdf import PdfReader
 from docx import Document
-from sentence_transformers import SentenceTransformer
+from chromadb.utils.embedding_functions import GeminiEmbeddingFunction
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from app_logging import logger
 
@@ -16,13 +17,25 @@ COLLECTION_NAME = "business_docs_v3"
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 150
 
-logger.info("Loading embedding model...")
-embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+# Global Init for Cloud-Based Gemini Embeddings (Fixes CPU Bottleneck)
+GEMINI_KEY = os.getenv("GEMINI_KEY")
+if not GEMINI_KEY:
+    logger.error("CRITICAL: GEMINI_KEY is missing from environment variables!")
+    raise ValueError("GEMINI_KEY must be provided for cloud embedding functions.")
 
-logger.info("Initializing ChromaDB...")
+logger.info("Initializing Gemini Cloud Embedding Engine...")
+gemini_ef = GeminiEmbeddingFunction(
+    api_key=GEMINI_KEY,
+    model_name="models/text-embedding-004"
+)
+
+logger.info("Initializing ChromaDB Index Storage...")
 chroma_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-collection = chroma_client.get_or_create_collection(name=COLLECTION_NAME)
-logger.info("ChromaDB initialized successfully")
+collection = chroma_client.get_or_create_collection(
+    name=COLLECTION_NAME,
+    embedding_function=gemini_ef # 👈 Shifts calculation stress away from Railway CPU
+)
+logger.info("ChromaDB vector matrix connected successfully.")
 
 splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
 
@@ -88,6 +101,8 @@ def extract_text(file_path):
 # UTILS
 # -----------------------------
 def generate_file_hash(file_path):
+    if not os.path.exists(file_path):
+        return "raw_text_no_hash"
     sha256 = hashlib.sha256()
     with open(file_path, "rb") as f:
         while chunk := f.read(4096):
@@ -101,72 +116,54 @@ def split_document(text):
 # -----------------------------
 # ADD DOCUMENT TO CHROMADB
 # -----------------------------
-def add_document(file_path, customer_name="default_customer"):
+def add_document(input_source, customer_name="default_customer", is_raw_text=False):
+    """
+    Saves and indexes assets. Supports file paths or raw text strings.
+    """
     try:
-        logger.info("Processing file: %s", file_path)
-        if not os.path.exists(file_path):
-            logger.error("File not found: %s", file_path)
-            return False
-
-        base_filename = os.path.basename(file_path)
-        source_identity = base_filename.replace(".tmp.txt", "") if base_filename.endswith(".tmp.txt") else base_filename
-
-        marker_file = file_path + ".done"
-        if os.path.exists(marker_file):
-            logger.info("--> [FAST SKIP] Already processed: %s", base_filename)
-            return True
-
-        existing = collection.get(where={"source": source_identity})
-        if existing and existing.get("ids"):
-            logger.info("Skipping duplicate file: %s", source_identity)
-            with open(marker_file, "w", encoding="utf-8") as marker:
-                marker.write("done")
-            return True
-
-        text = extract_text(file_path)
-        if not text.strip():
-            logger.warning("Empty document: %s", file_path)
-            return False
-
-        # -------------------------------------------------------------
-        # ABSOLUTE FIX: FORCE STRICT ROW ISOLATION FOR SPREADSHEETS
-        # -------------------------------------------------------------
-        # Check if the text content looks like Excel data matrix rows
-        if "Product:" in text or source_identity.endswith(('.xlsx', '.xls', '.csv')):
-            # Split clean single text lines by ignoring table headers and structural sheet tags
-            raw_lines = text.split("\n")
-            chunks = []
-            for line in raw_lines:
-                clean_line = line.strip()
-                # Check for explicit data flags and throw away unpopulated structures
-                if clean_line and "Product:" in clean_line:
-                    chunks.append(clean_line)
-            logger.info("Excel Processing: Split text cleanly into %d single product rows.", len(chunks))
+        if not is_raw_text:
+            if not os.path.exists(input_source):
+                logger.error("File not found: %s", input_source)
+                return False
+            base_filename = os.path.basename(input_source)
+            source_identity = base_filename.replace(".tmp.txt", "") if base_filename.endswith(".tmp.txt") else base_filename
+            text = extract_text(input_source)
+            file_hash = generate_file_hash(input_source)
         else:
-            # Fallback to general semantic chunks for standard documents and text assets
+            # Handle in-memory streaming text blocks directly
+            source_identity = f"raw_stream_{hashlib.md5(input_source.encode()).hexdigest()[:8]}"
+            text = input_source
+            file_hash = "in_memory_stream"
+
+        if not text.strip():
+            return False
+
+        # Parse data row boundaries safely
+        if "Product:" in text or source_identity.endswith(('.xlsx', '.xls', '.csv')):
+            raw_lines = text.split("\n")
+            chunks = [line.strip() for line in raw_lines if line.strip() and "Product:" in line]
+        else:
             chunks = split_document(text)
-            logger.info("Generated %d generic chunks for text document: %s", len(chunks), source_identity)
 
         if not chunks:
-            logger.warning("No discrete chunks generated for: %s", file_path)
             return False
 
-        embeddings = embed_model.encode(chunks).tolist()
+        # Bulk generation configuration setup
         ids = [f"{customer_name}_{source_identity}_{i}" for i in range(len(chunks))]
-        metadatas = [{"source": source_identity, "customer": customer_name, "file_hash": generate_file_hash(file_path), "chunk_index": i} for i in range(len(chunks))]
+        metadatas = [{
+            "source": source_identity, 
+            "customer": customer_name, 
+            "file_hash": file_hash, 
+            "chunk_index": i
+        } for i in range(len(chunks))]
 
-        collection.add(documents=chunks, embeddings=embeddings, metadatas=metadatas, ids=ids)
-
-        with open(marker_file, "w", encoding="utf-8") as marker:
-            marker.write("done")
-
-        logger.info("Successfully added document: %s", source_identity)
+        # ChromaDB automatically vectorises via gemini_ef in the cloud now!
+        collection.add(documents=chunks, metadatas=metadatas, ids=ids)
         return True
 
     except Exception as e:
-        logger.exception("Error adding document: %s", file_path)
+        logger.exception("Error writing data payload to index database layer: %s", e)
         return False
-
 
 # -----------------------------
 # SEARCH DOCUMENTS
@@ -175,63 +172,62 @@ def search_documents(query, customer_name="default_customer", n_results=15):
     documents = []
     query_clean = query.lower()
 
-    # Keyword fallback with strict word-boundary matching
     try:
-        import re
         tokens = re.findall(r'\b\w+\b', query_clean)
         filler_words = {"what", "is", "the", "of", "price", "details", "for", "in", "stock", "enquiry", "tell", "me", "pls", "please", "show", "check", "cost", "how", "much", "find", "list", "get", "with", "any"}
-        search_terms = [w for w in tokens if w not in filler_words and len(w) > 0] # Changed len > 0 to catch single numbers like '7'
+        search_terms = [w for w in tokens if w not in filler_words and len(w) > 0]
 
-        logger.info("Keyword search terms: %s", search_terms)
+        logger.info("Keyword search terms parsed: %s", search_terms)
 
         if search_terms:
             results = collection.get(where={"customer": customer_name})
             if results and results.get("documents"):
                 all_docs = results["documents"]
 
-                # First pass: match ALL terms as whole distinct words
                 strict_matches = []
                 for doc in all_docs:
                     doc_lower = doc.lower()
-                    # \b ensures complete standalone word matching (skips substrings like A1387)
                     if all(re.search(r'\b' + re.escape(term) + r'\b', doc_lower) for term in search_terms):
                         strict_matches.append(doc)
                     if len(strict_matches) >= 6:
                         break
 
                 if strict_matches:
-                    logger.info("Found %d strict matches for terms %s", len(strict_matches), search_terms)
+                    logger.info("Found %d strict keyword matches", len(strict_matches))
                     documents.extend(strict_matches)
                 else:
-                    # Fallback: match at least 2 terms, or 1 if query is short (using word boundaries)
+                    # Generic partial term match routing fallback
                     min_matches = 2 if len(search_terms) > 2 else 1
                     for doc in all_docs:
                         doc_lower = doc.lower()
                         match_count = sum(1 for term in search_terms if re.search(r'\b' + re.escape(term) + r'\b', doc_lower))
                         if match_count >= min_matches:
                             documents.append(doc)
-                        if len(documents) >= 6:
+                        if len(documents) >= n_results:
                             break
-                    logger.info("No strict match. Using fallback with min %d matches, got %d docs", min_matches, len(documents))
+
+        # If keyword search returned nothing, fall back to structural cloud vector searches
+        if not documents:
+            logger.info("Falling back to vector semantic embedding lookup.")
+            # Chroma DB uses the cloud gemini_ef directly for query embedding compilation
+            vector_results = collection.query(
+                query_texts=[query],
+                n_results=n_results,
+                where={"customer": customer_name}
+            )
+            if vector_results and vector_results.get("documents"):
+                documents = vector_results["documents"][0]
+
     except Exception as e:
-        logger.error("Keyword fallback failed: %s", e)
-
-    # Vector search - backfill and deduplicate remaining positions
-    try:
-        query_embedding = embed_model.encode([query]).tolist()
-        results = collection.query(query_embeddings=query_embedding, n_results=n_results, where={"customer": customer_name})
-        if results and results.get("documents") and results["documents"][0]:
-            for doc in results["documents"][0]:
-                if doc and doc not in documents:
-                    documents.append(doc)
-    except Exception as e:
-        logger.exception("Error searching semantic documents: %s", e)
-
-    return documents[:n_results]
-
+        logger.exception("Error executing search queries across collection matrix: %s", e)
+        
+    return documents
 
 def build_context(documents):
-    return "\n\n".join(documents) if documents else "No relevant information found."
+    if not documents:
+        return "No relevant information found."
+    return "\n".join(documents)
+
 
 def initialize_default_documents():
     faq_path = "faq.md"

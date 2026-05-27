@@ -172,7 +172,7 @@ def webhook():
             Columns map to: [ID | Store | Product Name | Barcode | Sales Price | Purchase Price | Repair Price | Qty | Brand | Desc | Model # | Suitable Models]
             
             Rules:
-            - Your response MUST be extremely brief: maximum 2 to 3 lines total.
+            - Your response MUST be extremely brief: do not shorten the answer.
             - Format the specific match exactly like this key-value layout:
               🛠️ *Item:* [Product Name] ([Suitable Models])
               💰 *Price:* $[Sales Price] | 🔧 *Repair:* $[Repair Price]

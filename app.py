@@ -25,7 +25,7 @@ if not all([WASENDER_KEY, GEMINI_KEY, INSTANCE_ID]):
 
 logger.info("Starting bot successfully. Instance ID: %s", INSTANCE_ID)
 
-scan_uploads_folder()
+scan_uploads_folder() #need to uncomment once testing is done.
 
 # 1. Load embedding model and vector DB once
 #logger.info("Loading embedding model...")

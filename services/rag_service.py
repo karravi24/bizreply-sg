@@ -14,7 +14,7 @@ from app_logging import logger
 # CONFIG
 # -----------------------------
 CHROMA_DB_PATH = "./chroma_db"
-COLLECTION_NAME = "business_docs_v3"
+COLLECTION_NAME = "business_docs_v4"
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 150
 

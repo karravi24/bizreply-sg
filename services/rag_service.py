@@ -27,6 +27,9 @@ if not GEMINI_KEY:
 # CUSTOM NATIVE GEMINI EMBEDDING FUNCTION
 # -----------------------------
 # 🛠️ UPDATE THIS CLASS IN services/rag_service.py (Lines 31-52)
+# -----------------------------
+# CUSTOM NATIVE EMBEDDING FUNCTION
+# -----------------------------
 class CloudVectorGenerator(EmbeddingFunction):
     """Custom embedding generator utilizing direct HTTP calls to Google's endpoints."""
     def __init__(self, api_key: str):
@@ -34,8 +37,6 @@ class CloudVectorGenerator(EmbeddingFunction):
 
     def __call__(self, input_texts: Documents) -> Embeddings:
         embeddings = []
-        
-        # ✅ FIXED: The complete, official Google Gemini endpoint URL
         target_url = "https://googleapis.com"
         query_params = {"key": self.api_key}
         
@@ -57,9 +58,21 @@ class CloudVectorGenerator(EmbeddingFunction):
                 embeddings.append(vector)
             except Exception as e:
                 logger.error("Cloud embedding API failure: %s", e)
-                # Keep database rows aligned if a single text chunk fails
                 embeddings.append([0.0] * 768) 
         return embeddings
+
+logger.info("Initializing Native Cloud Vector Engine...")
+# 🛠️ FIXED: Changed from DirectGeminiEmbeddingFunction to CloudVectorGenerator
+gemini_ef = CloudVectorGenerator(api_key=GEMINI_KEY)
+
+logger.info("Initializing ChromaDB Index Storage...")
+chroma_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
+collection = chroma_client.get_or_create_collection(
+    name=COLLECTION_NAME,
+    embedding_function=gemini_ef
+)
+logger.info("ChromaDB vector matrix connected successfully.")
+
 
 # ✅ FIXED: Remember to update your instantiation line right below the class to use the new name:
 gemini_ef = CloudVectorGenerator(api_key=GEMINI_KEY)

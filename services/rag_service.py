@@ -1,367 +1,200 @@
 import os
 import hashlib
 import chromadb
-
+import pandas as pd
+from pypdf import PdfReader
+from docx import Document
 from sentence_transformers import SentenceTransformer
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-
-
 from app_logging import logger
 
 # -----------------------------
 # CONFIG
 # -----------------------------
-
 CHROMA_DB_PATH = "./chroma_db"
 COLLECTION_NAME = "business_docs"
-
-# -----------------------------
-# INIT EMBEDDING MODEL
-# -----------------------------
+CHUNK_SIZE = 800
+CHUNK_OVERLAP = 150
 
 logger.info("Loading embedding model...")
 embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 
-# -----------------------------
-# INIT CHROMADB
-# -----------------------------
-
 logger.info("Initializing ChromaDB...")
 chroma_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-
-collection = chroma_client.get_or_create_collection(
-    name=COLLECTION_NAME
-)
-
+collection = chroma_client.get_or_create_collection(name=COLLECTION_NAME)
 logger.info("ChromaDB initialized successfully")
 
+splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
 
 # -----------------------------
-# TEXT SPLITTER
+# FILE READERS
 # -----------------------------
+def read_txt_md(file_path):
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        return f.read()
 
-splitter = RecursiveCharacterTextSplitter(
-    chunk_size=800,
-    chunk_overlap=150
-)
+def read_pdf(file_path):
+    text = ""
+    try:
+        reader = PdfReader(file_path)
+        for page in reader.pages:
+            if page.extract_text():
+                text += page.extract_text() + "\n"
+    except Exception as e:
+        logger.exception("Error reading PDF %s: %s", file_path, e)
+    return text
 
+def read_docx(file_path):
+    text = ""
+    try:
+        doc = Document(file_path)
+        for para in doc.paragraphs:
+            if para.text.strip():
+                text += para.text + "\n"
+    except Exception as e:
+        logger.exception("Error reading DOCX %s: %s", file_path, e)
+    return text
+
+def read_excel(file_path):
+    text = ""
+    try:
+        df_dict = pd.read_excel(file_path, sheet_name=None, dtype=str)
+        for sheet_name, df in df_dict.items():
+            df = df.fillna("")
+            text += f"\nSheet: {sheet_name}\n"
+            for _, row in df.iterrows():
+                row_text = " | ".join([f"{col}: {val}" for col, val in row.items() if val])
+                if row_text:
+                    text += row_text + "\n"
+    except Exception as e:
+        logger.exception("Error reading Excel %s: %s", file_path, e)
+    return text
+
+def extract_text(file_path):
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext in [".txt", ".md"]:
+        return read_txt_md(file_path)
+    elif ext == ".pdf":
+        return read_pdf(file_path)
+    elif ext == ".docx":
+        return read_docx(file_path)
+    elif ext in [".xlsx", ".xls", ".csv"]:
+        return read_excel(file_path)
+    else:
+        logger.warning("Unsupported file type: %s", ext)
+        return ""
 
 # -----------------------------
-# GENERATE FILE HASH
+# UTILS
 # -----------------------------
-
 def generate_file_hash(file_path):
-    """
-    Generate SHA256 hash for duplicate prevention
-    """
     sha256 = hashlib.sha256()
-
     with open(file_path, "rb") as f:
         while chunk := f.read(4096):
             sha256.update(chunk)
-
     return sha256.hexdigest()
 
-
-# -----------------------------
-# LOAD FILE CONTENT
-# -----------------------------
-
-def load_text_file(file_path):
-    """
-    Load .md or .txt files
-    """
-
-    with open(file_path, "r", encoding="utf-8") as f:
-        return f.read()
-
-
-# -----------------------------
-# CHUNK DOCUMENT
-# -----------------------------
-
 def split_document(text):
-    """
-    Split large document into chunks
-    """
-
     chunks = splitter.split_text(text)
-
-    cleaned = [c.strip() for c in chunks if c.strip()]
-
-    return cleaned
-
+    return [c.strip() for c in chunks if c.strip()]
 
 # -----------------------------
 # ADD DOCUMENT TO CHROMADB
 # -----------------------------
-
-def add_document(
-    file_path,
-    customer_name="default_customer"
-):
-    """
-    Load, chunk, embed, and store document with dual-layer duplication blocking 
-    (ChromaDB index check + local container disk marker check).
-    """
+def add_document(file_path, customer_name="default_customer"):
     try:
         logger.info("Processing file: %s", file_path)
-
         if not os.path.exists(file_path):
             logger.error("File not found: %s", file_path)
             return False
 
-        # Extract the true source filename (stripping out any temporary extension noise)
         base_filename = os.path.basename(file_path)
-        if base_filename.endswith(".tmp.txt"):
-            source_identity = base_filename.replace(".tmp.txt", "")
-        else:
-            source_identity = base_filename
+        source_identity = base_filename.replace(".tmp.txt", "") if base_filename.endswith(".tmp.txt") else base_filename
 
-        # -------------------------------------------------------------
-        # LAYER 1: DISK MARKER CHECK (Fast short-circuit for container reboots)
-        # -------------------------------------------------------------
         marker_file = file_path + ".done"
         if os.path.exists(marker_file):
-            logger.info("--> [FAST SKIP] File already processed in this runtime lifecycle: %s", base_filename)
+            logger.info("--> [FAST SKIP] Already processed: %s", base_filename)
             return True
 
-        # -------------------------------------------------------------
-        # LAYER 2: VECTOR DB DUPLICATE CHECK BY SOURCE FILENAME
-        # -------------------------------------------------------------
-        existing = collection.get(
-            where={"source": source_identity}
-        )
-
-        if existing and existing.get("ids") and len(existing["ids"]) > 0:
-            logger.info(
-                "Skipping duplicate file (already indexed in vector DB): %s",
-                source_identity
-            )
-            # Create the disk marker so layer 1 catches it next time without hitting the DB
+        existing = collection.get(where={"source": source_identity})
+        if existing and existing.get("ids"):
+            logger.info("Skipping duplicate file: %s", source_identity)
             with open(marker_file, "w", encoding="utf-8") as marker:
                 marker.write("done")
             return True
 
-        file_hash = generate_file_hash(file_path)
-
-        # -----------------------------
-        # LOAD CONTENT
-        # -----------------------------
-        ext = os.path.splitext(file_path)[1].lower()
-
-        if ext in [".md", ".txt"]:
-            text = load_text_file(file_path)
-        else:
-            logger.warning(
-                "Unsupported file type: %s",
-                ext
-            )
-            return False
-
+        text = extract_text(file_path)
         if not text.strip():
-            logger.warning("Empty document")
+            logger.warning("Empty document: %s", file_path)
             return False
 
-        # -----------------------------
-        # SPLIT INTO CHUNKS
-        # -----------------------------
         chunks = split_document(text)
+        logger.info("Generated %d chunks for %s", len(chunks), source_identity)
 
-        logger.info(
-            "Generated %d chunks",
-            len(chunks)
-        )
-
-        # -----------------------------
-        # CREATE EMBEDDINGS
-        # -----------------------------
         embeddings = embed_model.encode(chunks).tolist()
+        ids = [f"{customer_name}_{source_identity}_{i}" for i in range(len(chunks))]
+        metadatas = [{"source": source_identity, "customer": customer_name, "file_hash": generate_file_hash(file_path), "chunk_index": i} for i in range(len(chunks))]
 
-        # -----------------------------
-        # CREATE UNIQUE IDS
-        # -----------------------------
-        ids = [
-            f"{customer_name}_{source_identity}_{i}"
-            for i in range(len(chunks))
-        ]
+        collection.add(documents=chunks, embeddings=embeddings, metadatas=metadatas, ids=ids)
 
-        # -----------------------------
-        # METADATA MAPPING
-        # -----------------------------
-        metadatas = []
-        for i in range(len(chunks)):
-            metadatas.append({
-                "source": source_identity,
-                "customer": customer_name,
-                "file_hash": file_hash,
-                "chunk_index": i
-            })
-
-        # -----------------------------
-        # STORE IN CHROMADB
-        # -----------------------------
-        collection.add(
-            documents=chunks,
-            embeddings=embeddings,
-            metadatas=metadatas,
-            ids=ids
-        )
-
-        # -----------------------------
-        # WRITE SUCCESS MARKER TO DISK
-        # -----------------------------
         with open(marker_file, "w", encoding="utf-8") as marker:
             marker.write("done")
 
-        logger.info(
-            "Successfully added document to Vector DB: %s",
-            source_identity
-        )
+        logger.info("Successfully added document: %s", source_identity)
         return True
 
     except Exception as e:
-        logger.exception(
-            "Error adding document: %s",
-            file_path
-        )
+        logger.exception("Error adding document: %s", file_path)
         return False
-
-
-
 
 # -----------------------------
 # SEARCH DOCUMENTS
 # -----------------------------
-
-def search_documents(
-    query,
-    customer_name="default_customer",
-    n_results=15
-):
-    """
-    Completely generic, brand-agnostic hybrid scanner.
-    Works for any phone, model number, or component variation automatically.
-    """
+def search_documents(query, customer_name="default_customer", n_results=15):
     documents = []
     query_clean = query.lower()
 
-    # -------------------------------------------------------------
-    # LAYER 1: DYNAMIC KEYWORD INTERSECTION FILTER
-    # -------------------------------------------------------------
+    # Keyword fallback only if vector search fails
     try:
         import re
-        # Isolate alphanumeric clusters (e.g. "iPhone 7 LCD" -> ["iphone", "7", "lcd"])
-        raw_tokens = re.findall(r'\b\w+\b', query_clean)
-        
-        # Comprehensive language noise baseline filter
-        filler_words = {
-            "what", "is", "the", "of", "price", "details", "for", "in", 
-            "stock", "enquiry", "tell", "me", "pls", "please", "show", 
-            "check", "cost", "how", "much", "find", "list", "get", "with", "any"
-        }
-        
-        # Extract only the critical unique keywords typed by the client
-        search_terms = [w for w in raw_tokens if w not in filler_words and len(w) > 0]
+        tokens = re.findall(r'\b\w+\b', query_clean)
+        filler_words = {"what", "is", "the", "of", "price", "details", "for", "in", "stock", "enquiry", "tell", "me", "pls", "please", "show", "check", "cost", "how", "much", "find", "list", "get", "with", "any"}
+        search_terms = [w for w in tokens if w not in filler_words and len(w) > 1]
 
-        fallback_file = f"uploads/{customer_name}/Product_ohms.xlsx.tmp.txt"
-        if os.path.exists(fallback_file) and search_terms:
-            with open(fallback_file, "r", encoding="utf-8") as f:
-                all_lines = [line.strip() for line in f.readlines() if line.strip()]
-
-            # 1. Match rows that intersect with ALL user-provided identifiers
-            for line in all_lines:
-                line_lower = line.lower()
-                if all(term in line_lower for term in search_terms):
-                    if line not in documents:
-                        documents.append(line)
-                if len(documents) >= 6:
-                    break
-
-            # 2. Match rows intersecting with MOST identifiers if an exact match is empty
-            if not documents:
-                # Require at least 2 identifiers to match to avoid irrelevant rows
-                required_match_count = max(2, len(search_terms) - 1) if len(search_terms) > 1 else 1
-                for line in all_lines:
-                    line_lower = line.lower()
-                    matches = sum(1 for term in search_terms if term in line_lower)
-                    if matches >= required_match_count:
-                        if line not in documents:
-                            documents.append(line)
-                    if len(documents) >= 5:
+        if search_terms:
+            results = collection.get(where={"customer": customer_name})
+            if results and results.get("documents"):
+                for doc in results["documents"]:
+                    doc_lower = doc.lower()
+                    if all(term in doc_lower for term in search_terms):
+                        documents.append(doc)
+                    if len(documents) >= 6:
                         break
-                        
-    except Exception as fallback_err:
-        logger.error("Dynamic keyword parser failed: %s", fallback_err)
+    except Exception as e:
+        logger.error("Keyword fallback failed: %s", e)
 
-    # -------------------------------------------------------------
-    # LAYER 2: CHROMADB VECTOR BACKFILL
-    # -------------------------------------------------------------
+    # Vector search
     try:
         query_embedding = embed_model.encode([query]).tolist()
-        results = collection.query(
-            query_embeddings=query_embedding,
-            n_results=n_results
-        )
-
-        if results and results.get("documents") and results["documents"]:
-            # Safely loop through and flatten ChromaDB's matrix array block
-            target_pool = results["documents"][0] if isinstance(results["documents"][0], list) else results["documents"]
-            for doc in target_pool:
-                if doc and str(doc) not in documents:
-                    documents.append(str(doc))
-                    
+        results = collection.query(query_embeddings=query_embedding, n_results=n_results, where={"customer": customer_name})
+        if results and results.get("documents"):
+            for doc in results["documents"][0]:
+                if doc and doc not in documents:
+                    documents.append(doc)
     except Exception as e:
         logger.exception("Error searching semantic documents: %s", e)
 
     return documents[:n_results]
 
-
-
-
-
-# -----------------------------
-# BUILD CONTEXT
-# -----------------------------
-
 def build_context(documents):
-    """
-    Join retrieved chunks into context
-    """
-
-    if not documents:
-        return "No relevant information found."
-
-    return "\n\n".join(documents)
-
-
-# -----------------------------
-# AUTO LOAD FAQ
-# -----------------------------
+    return "\n\n".join(documents) if documents else "No relevant information found."
 
 def initialize_default_documents():
-
     faq_path = "faq.md"
-
     if os.path.exists(faq_path):
-
-        logger.info(
-            "Initializing default FAQ document..."
-        )
-
-        add_document(
-            faq_path,
-            customer_name="beesbuzz"
-        )
-
+        logger.info("Initializing default FAQ document...")
+        add_document(faq_path, customer_name="beesbuzz")
     else:
-        logger.warning(
-            "faq.md not found. Skipping preload."
-        )
-
-
-# -----------------------------
-# INIT ON STARTUP
-# -----------------------------
+        logger.warning("faq.md not found. Skipping preload.")
 
 initialize_default_documents()

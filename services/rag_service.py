@@ -5,7 +5,8 @@ import chromadb
 import pandas as pd
 from pypdf import PdfReader
 from docx import Document
-from chromadb.utils.embedding_functions import GeminiEmbeddingFunction
+# 🛠️ FIXED: Import the correct official ChromaDB Google wrapper
+from chromadb.utils.embedding_functions import GoogleGenerativeAiEmbeddingFunction
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from app_logging import logger
 
@@ -17,25 +18,27 @@ COLLECTION_NAME = "business_docs_v3"
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 150
 
-# Global Init for Cloud-Based Gemini Embeddings (Fixes CPU Bottleneck)
+# Global Init for Cloud-Based Google Embeddings
 GEMINI_KEY = os.getenv("GEMINI_KEY")
 if not GEMINI_KEY:
     logger.error("CRITICAL: GEMINI_KEY is missing from environment variables!")
     raise ValueError("GEMINI_KEY must be provided for cloud embedding functions.")
 
-logger.info("Initializing Gemini Cloud Embedding Engine...")
-gemini_ef = GeminiEmbeddingFunction(
+logger.info("Initializing Google Gemini Cloud Embedding Engine...")
+# 🛠️ FIXED: Using the native class name that ChromaDB expects
+gemini_ef = GoogleGenerativeAiEmbeddingFunction(
     api_key=GEMINI_KEY,
-    model_name="models/text-embedding-004"
+    model_name="text-embedding-004" # ⚡ High speed cloud text embedding model
 )
 
 logger.info("Initializing ChromaDB Index Storage...")
 chroma_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
 collection = chroma_client.get_or_create_collection(
     name=COLLECTION_NAME,
-    embedding_function=gemini_ef # 👈 Shifts calculation stress away from Railway CPU
+    embedding_function=gemini_ef
 )
 logger.info("ChromaDB vector matrix connected successfully.")
+
 
 splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
 

@@ -191,6 +191,7 @@ def debug_search():
 
 if __name__ == "__main__":
     # Run scan once on startup for local dev
+    logger.info("Gemini reply: %s", reply)
     scan_uploads_folder()
     port = int(os.getenv("PORT", 5050))
     app.run(host="0.0.0.0", port=port, debug=False)

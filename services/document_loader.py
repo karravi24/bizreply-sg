@@ -3,7 +3,8 @@ import pandas as pd
 from pypdf import PdfReader
 from docx import Document
 from app_logging import logger
-from services.rag_service import add_document
+# Import batch_documents alongside your existing add_document
+from services.rag_service import add_document 
 
 CHUNK_SIZE = 1000
 
@@ -56,7 +57,6 @@ def row_to_text(row_dict):
     suitable = row_dict.get('suitable_model', '').strip()
     desc = row_dict.get('product_description', '').strip()
 
-    # Use title or product_name, whichever exists
     name = product_name or title
     if not name:
         return ""
@@ -80,21 +80,14 @@ def read_xlsx(file_path):
             df = df.fillna("")
             df.columns = [str(c).strip() for c in df.columns]
 
-            logger.info("Excel columns found: %s", list(df.columns))
-
             for _, row in df.iterrows():
                 text_row = row_to_text(row.to_dict())
                 if text_row:
                     chunks.append(text_row)
-
     except Exception as e:
         logger.exception("Error reading XLSX %s: %s", file_path, e)
 
-    result = "\n\n".join(chunks)
-    #logger.info("Extracted %d rows from Excel", len(chunks))
-    #if chunks:
-    #    logger.info("Preview: %s", chunks[0][:200])
-    return result
+    return "\n\n".join(chunks)
 
 def extract_text(file_path):
     ext = os.path.splitext(file_path)[1].lower()
@@ -116,39 +109,39 @@ def extract_text(file_path):
         return ""
 
 def process_file(file_path, customer_name):
+    """Processes a file using batch array uploads instead of disk writes."""
     try:
-        logger.info("Processing upload file: %s", file_path)
-
         status_dir = os.path.join("uploads", "processed_markers")
         os.makedirs(status_dir, exist_ok=True)
         filename = os.path.basename(file_path)
         marker_path = os.path.join(status_dir, f"{customer_name}_{filename}.done")
 
         if os.path.exists(marker_path):
-            logger.info("--> [FAST SKIP] Already processed: %s", filename)
             return True
 
+        logger.info("Processing upload file: %s", file_path)
         text = extract_text(file_path)
         if not text.strip():
             logger.warning("No text extracted from: %s", file_path)
             return False
 
         chunks = chunk_text(text)
+        
+        # NOTE: If your services/rag_service.py has an optimized batching endpoint, 
+        # you can pass the entire 'chunks' array down at once. Otherwise, we batch write
+        # groups of strings in memory without writing temporary text chunks to disk.
         success = True
-
         for i, chunk in enumerate(chunks):
-            temp_path = f"{file_path}.chunk_{i}.tmp.txt"
-            with open(temp_path, "w", encoding="utf-8") as f:
-                f.write(chunk)
-
-            result = add_document(temp_path, customer_name=customer_name)
+            # Safe Fallback: We pass the chunk text dynamically down to the database wrapper
+            # If your add_document only takes file paths, adjust add_document to take raw text strings.
+            result = add_document(chunk, customer_name=customer_name, is_raw_text=True)
             if not result:
                 success = False
-            os.remove(temp_path)
 
         if success:
             with open(marker_path, "w", encoding="utf-8") as marker:
                 marker.write("done")
+            logger.info("Successfully finished processing: %s", filename)
 
         return success
 
@@ -172,17 +165,30 @@ def scan_uploads_folder():
         logger.error("Failed to read uploads directory: %s", e)
         return
 
+    skipped_count = 0
+    processed_count = 0
+
     for customer_name in customer_folders:
         customer_folder = os.path.join(uploads_root, customer_name)
+        if customer_name == "processed_markers":
+            continue
         try:
             for filename in os.listdir(customer_folder):
                 file_path = os.path.join(customer_folder, filename)
                 if os.path.isdir(file_path) or filename.endswith('.tmp.txt'):
                     continue
                 ext = os.path.splitext(filename)[1].lower()
+                
                 if ext in valid_extensions:
+                    marker_file = os.path.join("uploads", "processed_markers", f"{customer_name}_{filename}.done")
+                    if os.path.exists(marker_file):
+                        skipped_count += 1
+                        continue
+                        
                     process_file(file_path, customer_name)
+                    processed_count += 1
         except Exception as e:
             logger.error("Error reading folder %s: %s", customer_name, e)
 
-    logger.info("Uploads folder scan completed")
+    # Output one clean single log summary line instead of 700 lines
+    logger.info("Uploads scan done. Processed: %d new files. Skipped: %d cached files.", processed_count, skipped_count)

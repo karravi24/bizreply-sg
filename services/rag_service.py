@@ -101,7 +101,8 @@ def add_document(
     customer_name="default_customer"
 ):
     """
-    Load, chunk, embed, and store document with absolute duplication blocking.
+    Load, chunk, embed, and store document with dual-layer duplication blocking 
+    (ChromaDB index check + local container disk marker check).
     """
     try:
         logger.info("Processing file: %s", file_path)
@@ -117,10 +118,17 @@ def add_document(
         else:
             source_identity = base_filename
 
-        # -----------------------------
-        # ABSOLUTE DUPLICATE CHECK BY SOURCE FILENAME
-        # -----------------------------
-        # This completely guarantees a file is indexed exactly once per client
+        # -------------------------------------------------------------
+        # LAYER 1: DISK MARKER CHECK (Fast short-circuit for container reboots)
+        # -------------------------------------------------------------
+        marker_file = file_path + ".done"
+        if os.path.exists(marker_file):
+            logger.info("--> [FAST SKIP] File already processed in this runtime lifecycle: %s", base_filename)
+            return True
+
+        # -------------------------------------------------------------
+        # LAYER 2: VECTOR DB DUPLICATE CHECK BY SOURCE FILENAME
+        # -------------------------------------------------------------
         existing = collection.get(
             where={"source": source_identity}
         )
@@ -130,6 +138,9 @@ def add_document(
                 "Skipping duplicate file (already indexed in vector DB): %s",
                 source_identity
             )
+            # Create the disk marker so layer 1 catches it next time without hitting the DB
+            with open(marker_file, "w", encoding="utf-8") as marker:
+                marker.write("done")
             return True
 
         file_hash = generate_file_hash(file_path)
@@ -197,6 +208,12 @@ def add_document(
             ids=ids
         )
 
+        # -----------------------------
+        # WRITE SUCCESS MARKER TO DISK
+        # -----------------------------
+        with open(marker_file, "w", encoding="utf-8") as marker:
+            marker.write("done")
+
         logger.info(
             "Successfully added document to Vector DB: %s",
             source_identity
@@ -209,6 +226,7 @@ def add_document(
             file_path
         )
         return False
+
 
 
 

@@ -22,9 +22,6 @@ if not all([WASENDER_KEY, GEMINI_KEY, INSTANCE_ID]):
 
 logger.info("Starting bot successfully. Instance ID: %s", INSTANCE_ID)
 
-# DON'T run this on import in production. Use a /reload endpoint or run once via CLI
-# scan_uploads_folder()
-
 def call_gemini(system_prompt, user_msg):
     """Call Gemini with retry and token limits for speed."""
     gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
@@ -55,11 +52,18 @@ def call_gemini(system_prompt, user_msg):
 
 @lru_cache(maxsize=200)
 def get_cached_reply(user_msg, context):
-    # Trim context to avoid 400 errors. Gemini 2.5 Flash has ~1M token limit,
-    # but long prompts still cause 400 if malformed
+    # Trim context at line boundaries to avoid cutting mid-row
     max_chars = 8000
     if len(context) > max_chars:
-        context = context[:max_chars] + "\n...truncated"
+        lines = context.splitlines()
+        truncated = []
+        current_len = 0
+        for line in lines:
+            if current_len + len(line) + 1 > max_chars:
+                break
+            truncated.append(line)
+            current_len += len(line) + 1
+        context = "\n".join(truncated) + "\n...truncated"
 
     system_prompt = f"""
     You are a precise WhatsApp assistant for BEESBUZZ Store answering stock/price checks.
@@ -71,16 +75,18 @@ def get_cached_reply(user_msg, context):
     Columns map to: [ID | Store | Product Name | Barcode | Sales Price | Purchase Price | Repair Price | Qty | Brand | Desc | Model # | Suitable Models]
 
     Rules:
+    - Treat product names case-insensitive. "iphone 7 lcd" matches "IPHONE 7 LCD".
     - If the exact model requested is missing from Context, reply ONLY: "I’ll check and get back to you."
     - If the model matches, reply in 1-2 lines:
       📦 *[Product Name]* | 💰 Price: $[Sales Price] (Repair: $[Repair Price]) | Stock: [Qty]
+    - If multiple matches exist, show the closest match only.
     """
-    logger.info("Context length: %d", len(context))
-    logger.info("Context preview: %s", context[:300]) # first 300 chars only
+    logger.debug("Context length: %d", len(context))
+    logger.debug("Context preview: %s", context[:300])
     return call_gemini(system_prompt, user_msg)
 
 def send_whatsapp_async(sender, reply):
-    """Send WhatsApp message in background thread."""
+    """Send WhatsApp message in background thread with retry."""
     if not reply or not reply.strip():
         logger.error("Empty reply, not sending to %s", sender)
         reply = "I’ll check and get back to you."
@@ -92,14 +98,20 @@ def send_whatsapp_async(sender, reply):
     }
     reply_payload = {"to": str(sender), "text": str(reply)}
 
-    try:
-        resp = requests.post(wasender_url, json=reply_payload, headers=headers, timeout=10)
-        if resp.status_code == 200:
-            logger.info("Message sent successfully to %s", sender)
-        else:
-            logger.error("WaSenderAPI failed: %d %s", resp.status_code, resp.text)
-    except Exception as e:
-        logger.error("Error sending WhatsApp message: %s", e)
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            resp = requests.post(wasender_url, json=reply_payload, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                logger.info("Message sent successfully to %s", sender)
+                return
+            else:
+                logger.error("WaSenderAPI failed: %d %s", resp.status_code, resp.text)
+        except Exception as e:
+            logger.error("Error sending WhatsApp message attempt %d: %s", attempt + 1, e)
+
+        if attempt < max_retries - 1:
+            time.sleep(2 ** attempt)
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -108,17 +120,24 @@ def webhook():
         if not data:
             return jsonify({"status": "ignored"}), 200
 
-        # Parse message
+        logger.info("Webhook payload: %s", data)
+
         user_msg, sender = "", ""
+
+        # 1. WaSenderAPI format from WhatsApp
         if data.get('event') == 'messages.received':
             msg_wrapper = data.get('data', {}).get('messages', {})
             message_content = msg_wrapper.get('message', {})
             key_data = msg_wrapper.get('key', {})
             user_msg = message_content.get('conversation') or message_content.get('extendedTextMessage', {}).get('text', '')
             sender = key_data.get('cleanedSenderPn') or key_data.get('senderPn', '').split('@')[0]
+
+        # 2. Local test format: {"message": "text", "sender": "123"}
         elif 'message' in data:
-            user_msg = data['message'].get('text', '')
-            sender = data['message'].get('from', '')
+            msg = data.get('message', '')
+            user_msg = msg if isinstance(msg, str) else msg.get('text', '')
+            sender = data.get('sender') or data.get('from') or "test_user"
+
         else:
             logger.warning("Unknown payload structure")
             return jsonify({"status": "ignored"}), 200
@@ -163,6 +182,15 @@ def reload_docs():
         logger.exception("Reload failed")
         return jsonify({"status": "error", "message": str(e)}), 500
 
+@app.route("/debug/search", methods=["GET"])
+def debug_search():
+    """Debug endpoint to check what ChromaDB returns"""
+    q = request.args.get("q", "iphone 7 lcd")
+    docs = search_documents(q, "beesbuzz", 5)
+    return jsonify({"query": q, "results": docs})
+
 if __name__ == "__main__":
+    # Run scan once on startup for local dev
+    scan_uploads_folder()
     port = int(os.getenv("PORT", 5050))
     app.run(host="0.0.0.0", port=port, debug=False)

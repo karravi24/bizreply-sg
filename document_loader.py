@@ -276,13 +276,15 @@ def scan_uploads_folder():
         # FIND FILES
         # -----------------------------------
 
+        # Updated to catch both lowercase and uppercase file variations
         patterns = [
-            "*.pdf",
-            "*.docx",
-            "*.xlsx",
-            "*.txt",
-            "*.md"
+            "*.pdf", "*.PDF",
+            "*.docx", "*.DOCX",
+            "*.xlsx", "*.XLSX",
+            "*.txt", "*.TXT",
+            "*.md", "*.MD"
         ]
+
 
         all_files = []
 

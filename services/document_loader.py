@@ -91,9 +91,9 @@ def read_xlsx(file_path):
         logger.exception("Error reading XLSX %s: %s", file_path, e)
 
     result = "\n\n".join(chunks)
-    logger.info("Extracted %d rows from Excel", len(chunks))
-    if chunks:
-        logger.info("Preview: %s", chunks[0][:200])
+    #logger.info("Extracted %d rows from Excel", len(chunks))
+    #if chunks:
+    #    logger.info("Preview: %s", chunks[0][:200])
     return result
 
 def extract_text(file_path):

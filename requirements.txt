@@ -16,3 +16,4 @@ langgraph-prebuilt==1.1.0
 langgraph-sdk==0.3.15
 langsmith==0.8.5
 pypdf==6.12.2
+python-docx>=1.1.0

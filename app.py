@@ -170,7 +170,7 @@ def webhook():
         {context}
 
          Rules:
-        - Your entire response MUST be extremely brief: maximum 2 to 3 lines total.
+        - Your entire response MUST be extremely brief: maximum 4 to 5 lines total.
         - Condense the answer from Context into a tight, short summary.
         - Use 1 emoji max.
         - Do not add anything not in Context.

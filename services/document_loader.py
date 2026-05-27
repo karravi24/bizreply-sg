@@ -166,29 +166,40 @@ def process_file(
     file_path,
     customer_name
 ):
-
     try:
-
         logger.info(
             "Processing upload file: %s",
             file_path
         )
 
+        # -------------------------------------------------------------
+        # PERMANENT FIX: CHECK PERSISTENT CONTAINER STATUS MARKER
+        # -------------------------------------------------------------
+        # Create a hidden status folder inside your uploads directory
+        status_dir = os.path.join("uploads", "processed_markers")
+        os.makedirs(status_dir, exist_ok=True)
+        
+        # Create a unique marker filename for this exact asset
+        filename = os.path.basename(file_path)
+        marker_path = os.path.join(status_dir, f"{customer_name}_{filename}.done")
+        
+        # If the marker exists on disk, skip processing completely!
+        if os.path.exists(marker_path):
+            logger.info("--> [FAST SKIP] File already processed in this container lifecycle: %s", filename)
+            return True
+
         text = extract_text(file_path)
 
         if not text.strip():
-
             logger.warning(
                 "No text extracted from: %s",
                 file_path
             )
-
             return False
 
         # -------------------------
         # TEMP TEXT FILE
         # -------------------------
-
         temp_path = file_path + ".tmp.txt"
 
         with open(
@@ -196,35 +207,38 @@ def process_file(
             "w",
             encoding="utf-8"
         ) as f:
-
             f.write(text)
 
         # -------------------------
         # ADD TO VECTOR DB
         # -------------------------
-
         result = add_document(
             temp_path,
             customer_name=customer_name
         )
 
+        # -------------------------------------------------------------
+        # IF ADDED SUCCESSFULLY, LOCK THE STATUS MARKER ON DISK
+        # -------------------------------------------------------------
+        if result:
+            with open(marker_path, "w", encoding="utf-8") as marker:
+                marker.write("done")
+
         # -------------------------
         # DELETE TEMP FILE
         # -------------------------
-
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
         return result
 
     except Exception as e:
-
         logger.exception(
             "Error processing file: %s",
-            e
+            file_path
         )
-
         return False
+
 
 
 # -----------------------------------

@@ -163,18 +163,24 @@ def webhook():
         logger.info("Context retrieved: %s", context[:200])
 
         system_prompt = f"""
-        You are a WhatsApp assistant for BEESBUZZ Store.
-        Use ONLY the info below. Output the full answer exactly as written in Context.
+            You are a concise WhatsApp assistant for BEESBUZZ Store answering stock/price checks.
+            Use ONLY the data in Context. Each product is formatted as columns separated by '|'.
+            
+            Context:
+            {context}
+            
+            Columns map to: [ID | Store | Product Name | Barcode | Sales Price | Purchase Price | Repair Price | Qty | Brand | Desc | Model # | Suitable Models]
+            
+            Rules:
+            - Your response MUST be extremely brief: maximum 2 to 3 lines total.
+            - Format the specific match exactly like this key-value layout:
+              🛠️ *Item:* [Product Name] ([Suitable Models])
+              💰 *Price:* $[Sales Price] | 🔧 *Repair:* $[Repair Price]
+              📦 *Stock:* [Qty] available
+            - Do not mention column headers, IDs, or purchase prices.
+            - If the exact item or model number is not in Context, reply ONLY: "I’ll check and get back to you."
+            """
 
-        Context:
-        {context}
-
-        Rules:
-        - Copy the complete answer from Context, do not shorten
-        - Do not add anything not in Context
-        - Use 1 emoji max
-        - If answer not in Context, reply: "I’ll check and get back to you"
-        """
 
         reply = get_cached_reply(system_prompt, user_msg)
         logger.info("Gemini reply: %s", reply)

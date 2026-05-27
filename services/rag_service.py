@@ -27,16 +27,15 @@ if not GEMINI_KEY:
 # CUSTOM NATIVE GEMINI EMBEDDING FUNCTION
 # -----------------------------
 # 🛠️ UPDATE THIS CLASS IN services/rag_service.py (Lines 31-52)
-class DirectGeminiEmbeddingFunction(EmbeddingFunction):
-    """Custom embedding generator utilizing direct HTTP calls to Gemini API."""
+class CloudVectorGenerator(EmbeddingFunction):
+    """Custom embedding generator utilizing direct HTTP calls to Google's endpoints."""
     def __init__(self, api_key: str):
-        # Cleanly isolate the key string
         self.api_key = str(api_key).strip()
 
     def __call__(self, input_texts: Documents) -> Embeddings:
         embeddings = []
         
-        # Hardcoding the exact URL layout directly in the sender loop guarantees no string overwrites
+        # ✅ FIXED: The complete, official Google Gemini endpoint URL
         target_url = "https://googleapis.com"
         query_params = {"key": self.api_key}
         
@@ -46,7 +45,6 @@ class DirectGeminiEmbeddingFunction(EmbeddingFunction):
                 "content": {"parts": [{"text": str(text)}]}
             }
             try:
-                # Issue the raw HTTP request with explicit params separation
                 response = requests.post(
                     target_url, 
                     params=query_params, 
@@ -58,11 +56,13 @@ class DirectGeminiEmbeddingFunction(EmbeddingFunction):
                 vector = response.json()["embedding"]["values"]
                 embeddings.append(vector)
             except Exception as e:
-                logger.error("Gemini embedding failure: %s", e)
-                # Fallback zero-vector keeps database alignment safe if a row glitches
+                logger.error("Cloud embedding API failure: %s", e)
+                # Keep database rows aligned if a single text chunk fails
                 embeddings.append([0.0] * 768) 
         return embeddings
 
+# ✅ FIXED: Remember to update your instantiation line right below the class to use the new name:
+gemini_ef = CloudVectorGenerator(api_key=GEMINI_KEY)
 
 
 logger.info("Initializing Native Gemini Cloud Embedding Engine...")

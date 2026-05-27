@@ -1,20 +1,17 @@
 import time
 import threading
 import requests
-import chromadb
+import os
 from functools import lru_cache
 from flask import Flask, request, jsonify
-from sentence_transformers import SentenceTransformer
 from app_logging import logger
-from services.rag_service import (search_documents, build_context)
-from services.document_loader import (scan_uploads_folder)
+from services.rag_service import search_documents, build_context
+from services.document_loader import scan_uploads_folder
+from dotenv import load_dotenv
 
+load_dotenv()
 app = Flask(__name__)
 
-from dotenv import load_dotenv
-load_dotenv()
-
-import os
 WASENDER_KEY = os.getenv("WASENDER_KEY")
 GEMINI_KEY = os.getenv("GEMINI_KEY")
 INSTANCE_ID = os.getenv("INSTANCE_ID")
@@ -25,37 +22,8 @@ if not all([WASENDER_KEY, GEMINI_KEY, INSTANCE_ID]):
 
 logger.info("Starting bot successfully. Instance ID: %s", INSTANCE_ID)
 
-scan_uploads_folder() #need to uncomment once testing is done.
-
-# 1. Load embedding model and vector DB once
-#logger.info("Loading embedding model...")
-#embed_model = SentenceTransformer("all-MiniLM-L6-v2")
-#chroma_client = chromadb.PersistentClient(path="./chroma_db")
-#collection = chroma_client.get_or_create_collection("business_docs")
-#logger.info("ChromaDB loaded. Docs in collection: %d", collection.count())
-
-# # 2. Run this once to load your docs into ChromaDB
-# def load_docs():
-#     logger.info("Loading docs from faq.md...")
-#     if not os.path.exists("faq.md"):
-#         logger.error("faq.md file not found! Skipping database pre-load.")
-#         return
-#
-#     with open("faq.md", "r", encoding="utf-8") as f:
-#         chunks = [c.strip() for c in f.read().split("\n\n") if c.strip()]
-#
-#     if chunks:
-#         embeddings = embed_model.encode(chunks).tolist()
-#         collection.add(
-#             documents=chunks,
-#             embeddings=embeddings,
-#             ids=[f"doc_{i}" for i in range(len(chunks))]
-#         )
-#         logger.info("Added %d chunks to ChromaDB", len(chunks))
-#
-# # Auto-load if empty
-# if collection.count() == 0:
-#     load_docs()
+# DON'T run this on import in production. Use a /reload endpoint or run once via CLI
+# scan_uploads_folder()
 
 def call_gemini(system_prompt, user_msg):
     """Call Gemini with retry and token limits for speed."""
@@ -82,30 +50,50 @@ def call_gemini(system_prompt, user_msg):
         except Exception as e:
             if attempt == max_retries:
                 logger.error("Gemini call failed after retries: %s", e)
-                raise
+                return None
     return None
 
-@lru_cache(maxsize=50)
-def get_cached_reply(system_prompt, user_msg):
-    """Cache responses for repeated questions."""
+@lru_cache(maxsize=200)
+def get_cached_reply(user_msg, context_hash):
+    """
+    Cache only on user_msg + context hash, not full context.
+    This prevents memory bloat and increases cache hits.
+    """
+    system_prompt = f"""
+    You are a precise WhatsApp assistant for BEESBUZZ Store answering stock/price checks.
+    The customer is asking about a specific phone model (e.g., iPhone 7).
+    Use ONLY the data in Context. Each product is formatted as columns separated by '|'.
+
+    Context:
+    {context_hash}
+
+    Columns map to: [ID | Store | Product Name | Barcode | Sales Price | Purchase Price | Repair Price | Qty | Brand | Desc | Model # | Suitable Models]
+
+    Rules:
+    - CRITICAL: Check the model number carefully. If the customer asks for "iPhone 7" but the Context ONLY shows other models like "iPhone 14" or "iPhone 13", you MUST consider this a mismatch.
+    - If the exact model requested by the customer is completely missing from the Context data, reply ONLY: "I’ll check and get back to you."
+    - If the model matches perfectly, reply horizontally on 1 or 2 lines maximum using this exact format:
+      📦 *[Product Name]* | 💰 Price: $[Sales Price] (Repair: $[Repair Price]) | Stock: [Qty]
+    """
     return call_gemini(system_prompt, user_msg)
 
 def send_whatsapp_async(sender, reply):
     """Send WhatsApp message in background thread."""
+    if not reply or not reply.strip():
+        logger.error("Empty reply, not sending to %s", sender)
+        reply = "I’ll check and get back to you."
+
     wasender_url = "https://www.wasenderapi.com/api/send-message"
     headers = {
         "Authorization": f"Bearer {WASENDER_KEY.strip()}",
         "Content-Type": "application/json"
     }
-    reply_payload = {
-        "to": str(sender),
-        "text": str(reply)
-    }
+    reply_payload = {"to": str(sender), "text": str(reply)}
 
     try:
         resp = requests.post(wasender_url, json=reply_payload, headers=headers, timeout=10)
         if resp.status_code == 200:
-            logger.info("Message sent successfully: %s", resp.text)
+            logger.info("Message sent successfully to %s", sender)
         else:
             logger.error("WaSenderAPI failed: %d %s", resp.status_code, resp.text)
     except Exception as e:
@@ -114,33 +102,21 @@ def send_whatsapp_async(sender, reply):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
-        data = request.json
-        logger.info("Webhook hit. Data: %s", data)
-
+        data = request.get_json(silent=True)
         if not data:
             return jsonify({"status": "ignored"}), 200
 
-        # 1. Real WaSenderAPI webhook
+        # Parse message
+        user_msg, sender = "", ""
         if data.get('event') == 'messages.received':
             msg_wrapper = data.get('data', {}).get('messages', {})
             message_content = msg_wrapper.get('message', {})
             key_data = msg_wrapper.get('key', {})
-
-            user_msg = ""
-            if 'conversation' in message_content:
-                user_msg = message_content.get('conversation', '')
-            elif 'extendedTextMessage' in message_content:
-                user_msg = message_content.get('extendedTextMessage', {}).get('text', '')
-
-            sender = key_data.get('cleanedSenderPn', '')
-            if not sender:
-                sender = key_data.get('senderPn', '').split('@')[0]
-
-        # 2. Test payload
+            user_msg = message_content.get('conversation') or message_content.get('extendedTextMessage', {}).get('text', '')
+            sender = key_data.get('cleanedSenderPn') or key_data.get('senderPn', '').split('@')[0]
         elif 'message' in data:
             user_msg = data['message'].get('text', '')
             sender = data['message'].get('from', '')
-
         else:
             logger.warning("Unknown payload structure")
             return jsonify({"status": "ignored"}), 200
@@ -151,40 +127,20 @@ def webhook():
 
         logger.info("Processing Message from %s: %s", sender, user_msg)
 
-        # 3. Retrieve context from ChromaDB - reduced to 1 chunk for speed
-        documents = search_documents(
-            query=user_msg,
-            customer_name="beesbuzz",
-            n_results=20
-        )
-
+        # Retrieve context
+        documents = search_documents(query=user_msg, customer_name="beesbuzz", n_results=10)
         context = build_context(documents)
 
-        logger.info("Context retrieved: %s", context[:200])
+        if not documents or context == "No relevant information found.":
+            reply = "I’ll check and get back to you."
+        else:
+            # Use hash of context for caching, not full text
+            context_hash = str(hash(context))
+            reply = get_cached_reply(user_msg, context_hash)
+            if not reply:
+                reply = "I’ll check and get back to you."
 
-        system_prompt = f"""
-        You are a precise WhatsApp assistant for BEESBUZZ Store answering stock/price checks.
-        The customer is asking about a specific phone model (e.g., iPhone 7).
-        Use ONLY the data in Context. Each product is formatted as columns separated by '|'.
-        
-        Context:
-        {context}
-        
-        Columns map to: [ID | Store | Product Name | Barcode | Sales Price | Purchase Price | Repair Price | Qty | Brand | Desc | Model # | Suitable Models]
-        
-        Rules:
-        - CRITICAL: Check the model number carefully. If the customer asks for "iPhone 7" but the Context ONLY shows other models like "iPhone 14" or "iPhone 13", you MUST consider this a mismatch.
-        - If the exact model requested by the customer is completely missing from the Context data, reply ONLY: "I’ll check and get back to you."
-        - If the model matches perfectly, reply horizontally on 1 or 2 lines maximum using this exact format:
-          📦 *[Product Name]* | 💰 Price: $[Sales Price] (Repair: $[Repair Price]) | Stock: [Qty]
-        """
-
-
-
-        reply = get_cached_reply(system_prompt, user_msg)
         logger.info("Gemini reply: %s", reply)
-
-        # 5. Send via WaSenderAPI in background thread
         threading.Thread(target=send_whatsapp_async, args=(sender, reply), daemon=True).start()
 
         return jsonify({"status": "ok"})
@@ -196,6 +152,16 @@ def webhook():
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "alive"})
+
+@app.route("/reload", methods=["POST"])
+def reload_docs():
+    """Call this manually when you upload new files"""
+    try:
+        scan_uploads_folder()
+        return jsonify({"status": "reload complete"}), 200
+    except Exception as e:
+        logger.exception("Reload failed")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5050))

@@ -1,12 +1,12 @@
 import os
 import hashlib
 import re
+import requests
 import chromadb
 import pandas as pd
 from pypdf import PdfReader
 from docx import Document
-# 🛠️ FIXED: Import the correct official ChromaDB Google wrapper
-from chromadb.utils.embedding_functions import GoogleGenerativeAiEmbeddingFunction
+from chromadb.api.types import EmbeddingFunction, Documents, Embeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from app_logging import logger
 
@@ -18,18 +18,40 @@ COLLECTION_NAME = "business_docs_v3"
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 150
 
-# Global Init for Cloud-Based Google Embeddings
 GEMINI_KEY = os.getenv("GEMINI_KEY")
 if not GEMINI_KEY:
     logger.error("CRITICAL: GEMINI_KEY is missing from environment variables!")
     raise ValueError("GEMINI_KEY must be provided for cloud embedding functions.")
 
-logger.info("Initializing Google Gemini Cloud Embedding Engine...")
-# 🛠️ FIXED: Using the native class name that ChromaDB expects
-gemini_ef = GoogleGenerativeAiEmbeddingFunction(
-    api_key=GEMINI_KEY,
-    model_name="text-embedding-004" # ⚡ High speed cloud text embedding model
-)
+# -----------------------------
+# CUSTOM NATIVE GEMINI EMBEDDING FUNCTION
+# -----------------------------
+class DirectGeminiEmbeddingFunction(EmbeddingFunction):
+    """Custom embedding generator utilizing direct HTTP calls to Gemini API."""
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.url = f"https://googleapis.com{self.api_key}"
+
+    def __call__(self, input_texts: Documents) -> Embeddings:
+        embeddings = []
+        for text in input_texts:
+            payload = {
+                "model": "models/text-embedding-004",
+                "content": {"parts": [{"text": text}]}
+            }
+            try:
+                response = requests.post(self.url, json=payload, timeout=15)
+                response.raise_for_status()
+                vector = response.json()["embedding"]["values"]
+                embeddings.append(vector)
+            except Exception as e:
+                logger.error("Gemini embedding failure: %s", e)
+                # Fallback zero-vector to keep alignment if one chunk fails
+                embeddings.append([0.0] * 768) 
+        return embeddings
+
+logger.info("Initializing Native Gemini Cloud Embedding Engine...")
+gemini_ef = DirectGeminiEmbeddingFunction(api_key=GEMINI_KEY)
 
 logger.info("Initializing ChromaDB Index Storage...")
 chroma_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
@@ -38,6 +60,7 @@ collection = chroma_client.get_or_create_collection(
     embedding_function=gemini_ef
 )
 logger.info("ChromaDB vector matrix connected successfully.")
+
 
 
 splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)

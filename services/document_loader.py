@@ -175,15 +175,12 @@ def process_file(
         # -------------------------------------------------------------
         # PERMANENT FIX: CHECK PERSISTENT CONTAINER STATUS MARKER
         # -------------------------------------------------------------
-        # Create a hidden status folder inside your uploads directory
         status_dir = os.path.join("uploads", "processed_markers")
         os.makedirs(status_dir, exist_ok=True)
-        
-        # Create a unique marker filename for this exact asset
+
         filename = os.path.basename(file_path)
         marker_path = os.path.join(status_dir, f"{customer_name}_{filename}.done")
-        
-        # If the marker exists on disk, skip processing completely!
+
         if os.path.exists(marker_path):
             logger.info("--> [FAST SKIP] File already processed in this container lifecycle: %s", filename)
             return True
@@ -224,11 +221,15 @@ def process_file(
             with open(marker_path, "w", encoding="utf-8") as marker:
                 marker.write("done")
 
-        # -------------------------
-        # DELETE TEMP FILE
-        # -------------------------
+        # -------------------------------------------------------------
+        # HIERARCHY CLEANUP
+        # -------------------------------------------------------------
+        # Delete PDF/Word temps, but KEEP Excel text logs for our keyword search engine fallback
         if os.path.exists(temp_path):
-            os.remove(temp_path)
+            if filename.endswith(('.xlsx', '.xls')):
+                logger.info("Keeping Excel text dump for keyword search: %s", temp_path)
+            else:
+                os.remove(temp_path)
 
         return result
 
@@ -238,6 +239,7 @@ def process_file(
             file_path
         )
         return False
+
 
 
 

@@ -26,29 +26,36 @@ if not GEMINI_KEY:
 # -----------------------------
 # CUSTOM NATIVE GEMINI EMBEDDING FUNCTION
 # -----------------------------
+# 🛠️ UPDATE THIS CLASS IN services/rag_service.py (Lines 31-52)
 class DirectGeminiEmbeddingFunction(EmbeddingFunction):
     """Custom embedding generator utilizing direct HTTP calls to Gemini API."""
     def __init__(self, api_key: str):
-        self.api_key = api_key
-        self.url = f"https://googleapis.com{self.api_key}"
+        # Strip out any newline spaces or hidden characters from your env config
+        self.api_key = api_key.strip()
+        # Clean URL target configuration without template suffix injections
+        self.url = "https://googleapis.com"
 
     def __call__(self, input_texts: Documents) -> Embeddings:
         embeddings = []
+        # Explicit query dictionary separation protects against host boundary contamination
+        params = {"key": self.api_key}
+        
         for text in input_texts:
             payload = {
                 "model": "models/text-embedding-004",
                 "content": {"parts": [{"text": text}]}
             }
             try:
-                response = requests.post(self.url, json=payload, timeout=15)
+                # Pass params as a separate object parameter block
+                response = requests.post(self.url, params=params, json=payload, timeout=15)
                 response.raise_for_status()
                 vector = response.json()["embedding"]["values"]
                 embeddings.append(vector)
             except Exception as e:
                 logger.error("Gemini embedding failure: %s", e)
-                # Fallback zero-vector to keep alignment if one chunk fails
                 embeddings.append([0.0] * 768) 
         return embeddings
+
 
 logger.info("Initializing Native Gemini Cloud Embedding Engine...")
 gemini_ef = DirectGeminiEmbeddingFunction(api_key=GEMINI_KEY)

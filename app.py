@@ -29,7 +29,7 @@ def call_gemini(system_prompt, user_msg):
         "contents": [{"parts": [{"text": f"{system_prompt}\n\nUser: {user_msg}"}]}],
         "generationConfig": {
             "temperature": 0.3,
-            "maxOutputTokens": 250
+            "maxOutputTokens": 500
         }
     }
 

@@ -16,8 +16,6 @@ WASENDER_KEY = os.getenv("WASENDER_KEY")
 GEMINI_KEY = os.getenv("GEMINI_KEY")
 INSTANCE_ID = os.getenv("INSTANCE_ID")
 
-logger.info(f"This is latest code.Loaded GEMINI_KEY: {GEMINI_KEY[:8]}...")
-
 if not all([WASENDER_KEY, GEMINI_KEY, INSTANCE_ID]):
     logger.error("Missing env vars: WASENDER_KEY, GEMINI_KEY, or INSTANCE_ID")
     raise SystemExit("Set env vars before running.")
@@ -31,25 +29,25 @@ def call_gemini(system_prompt, user_msg):
         "contents": [{"parts": [{"text": f"{system_prompt}\n\nUser: {user_msg}"}]}],
         "generationConfig": {
             "temperature": 0.3,
-            "maxOutputTokens": 1500
+            "maxOutputTokens": 500
         }
     }
 
     max_retries = 2
     for attempt in range(max_retries + 1):
-    try:
-        r = requests.post(gemini_url, json=payload, timeout=15)
-        if r.status_code in (429, 503):
-            wait = 2 ** attempt
-            logger.warning("Gemini %s, retrying in %ss", r.status_code, wait)
-            time.sleep(wait)
-            continue
-        r.raise_for_status()
-        return r.json()['candidates'][0]['content']['parts'][0]['text']
-    except Exception as e:
-        logger.error("Gemini call failed attempt %d: %s", attempt + 1, e)
-        if attempt == max_retries:
-            return None
+        try:
+            r = requests.post(gemini_url, json=payload, timeout=15)
+            if r.status_code == 429:
+                wait = 2 ** attempt
+                logger.warning("Gemini 429, retrying in %ss", wait)
+                time.sleep(wait)
+                continue
+            r.raise_for_status()
+            return r.json()['candidates'][0]['content']['parts'][0]['text']
+        except Exception as e:
+            if attempt == max_retries:
+                logger.error("Gemini call failed after retries: %s", e)
+                return None
     return None
 
 @lru_cache(maxsize=200)
@@ -115,15 +113,9 @@ def send_whatsapp_async(sender, reply):
         if attempt < max_retries - 1:
             time.sleep(2 ** attempt)
 
-@app.route("/webhook", methods=["GET", "POST"])
+@app.route("/webhook", methods=["POST"])
 def webhook():
     try:
-        if request.method == "GET":
-        verify_token = os.getenv("VERIFY_TOKEN")
-        if request.args.get("hub.verify_token") == verify_token:
-            return request.args.get("hub.challenge")
-        return "Forbidden", 403
-        
         data = request.get_json(silent=True)
         if not data:
             return jsonify({"status": "ignored"}), 200
@@ -160,6 +152,8 @@ def webhook():
         documents = search_documents(query=user_msg, customer_name="beesbuzz", n_results=10)
         context = build_context(documents)
 
+        logger.info("Retrive Contex %s: %s", documents, context)
+
         if not documents or not context.strip() or context == "No relevant information found.":
             reply = "I’ll check and get back to you."
         else:
@@ -180,7 +174,7 @@ def webhook():
 def health():
     return jsonify({"status": "alive"})
 
-@app.route("/reload", methods=["POST"])
+@app.route("/reload", methods=["GET"])
 def reload_docs():
     """Call this manually when you upload new files"""
     try:

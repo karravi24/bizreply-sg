@@ -11,6 +11,12 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from app_logging import logger
 from dotenv import load_dotenv
 
+import time
+import requests
+from typing import List
+import logging
+
+
 load_dotenv()
 # -----------------------------
 # CONFIG
@@ -36,48 +42,74 @@ if not GEMINI_KEY:
 # -----------------------------
 # CUSTOM NATIVE EMBEDDING FUNCTION
 # -----------------------------
-import requests
-from chromadb.api.types import Documents, Embeddings, EmbeddingFunction
-
-import requests
-import logging
-from typing import List
-
 logger = logging.getLogger(__name__)
 
+
+
+
 class CloudVectorGenerator(EmbeddingFunction):
-    """Custom embedding generator using Google Gemini embeddings."""
+    """Custom embedding generator using Google Gemini embeddings with batching."""
 
     def __init__(self, api_key: str):
         self.api_key = str(api_key).strip()
         self.model = "models/gemini-embedding-001"
-        self.endpoint = f"https://generativelanguage.googleapis.com/v1beta/{self.model}:embedContent"
+        self.endpoint = f"https://generativelanguage.googleapis.com/v1beta/{self.model}:batchEmbedContents"
+        self.batch_size = 100  # Gemini allows up to 100 per request
+        self.max_retries = 3
 
     def __call__(self, input_texts: Documents) -> Embeddings:
         embeddings = []
         query_params = {"key": self.api_key}
 
-        for text in input_texts:
+        # Process in batches
+        for i in range(0, len(input_texts), self.batch_size):
+            batch = input_texts[i:i + self.batch_size]
             payload = {
-                "model": self.model,
-                "content": {"parts": [{"text": str(text)}]},
-                "output_dimensionality": 768
+                "requests": [
+                    {
+                        "model": self.model,
+                        "content": {"parts": [{"text": str(text)}]},
+                        "output_dimensionality": 768
+                    }
+                    for text in batch
+                ]
             }
-            try:
-                response = requests.post(
-                    self.endpoint,
-                    params=query_params,
-                    json=payload,
-                    timeout=30
-                )
-                response.raise_for_status()
-                data = response.json()
-                vector = data["embedding"]["values"]
-                embeddings.append(vector)
-            except Exception as e:
-                logger.error("Cloud embedding API failure: %s", e)
-                # Return zero vector to avoid breaking ChromaDB batch
-                embeddings.append([0.0] * 768)
+
+            for attempt in range(self.max_retries):
+                try:
+                    response = requests.post(
+                        self.endpoint,
+                        params=query_params,
+                        json=payload,
+                        timeout=120  # longer timeout for batches
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    
+                    batch_embeddings = [e["values"] for e in data["embeddings"]]
+                    embeddings.extend(batch_embeddings)
+                    break
+
+                except requests.exceptions.HTTPError as e:
+                    status = e.response.status_code if e.response else None
+                    
+                    # Retry on 503, 429, 500
+                    if status in [503, 429, 500] and attempt < self.max_retries - 1:
+                        sleep_time = 2 ** attempt  # 1s, 2s, 4s
+                        logger.warning(f"Embedding API {status}, retrying in {sleep_time}s...")
+                        time.sleep(sleep_time)
+                        continue
+                    
+                    logger.error("Cloud embedding API failure: %s", e)
+                    # Fallback to zero vectors for failed batch only
+                    embeddings.extend([[0.0] * 768] * len(batch))
+                    break
+
+                except Exception as e:
+                    logger.error("Cloud embedding API failure: %s", e)
+                    embeddings.extend([[0.0] * 768] * len(batch))
+                    break
+
         return embeddings
 
 

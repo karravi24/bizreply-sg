@@ -91,6 +91,7 @@ class CloudVectorGenerator(EmbeddingFunction):
                     break
 
                 except requests.exceptions.HTTPError as e:
+                    logger.error(f"Gemini API 400: {e.response.text}")
                     status = e.response.status_code if e.response else None
                     
                     # Retry on 503, 429, 500

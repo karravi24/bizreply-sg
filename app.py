@@ -35,19 +35,19 @@ def call_gemini(system_prompt, user_msg):
 
     max_retries = 2
     for attempt in range(max_retries + 1):
-        try:
-            r = requests.post(gemini_url, json=payload, timeout=15)
-            if r.status_code == 429:
-                wait = 2 ** attempt
-                logger.warning("Gemini 429, retrying in %ss", wait)
-                time.sleep(wait)
-                continue
-            r.raise_for_status()
-            return r.json()['candidates'][0]['content']['parts'][0]['text']
-        except Exception as e:
-            if attempt == max_retries:
-                logger.error("Gemini call failed after retries: %s", e)
-                return None
+    try:
+        r = requests.post(gemini_url, json=payload, timeout=15)
+        if r.status_code in (429, 503):
+            wait = 2 ** attempt
+            logger.warning("Gemini %s, retrying in %ss", r.status_code, wait)
+            time.sleep(wait)
+            continue
+        r.raise_for_status()
+        return r.json()['candidates'][0]['content']['parts'][0]['text']
+    except Exception as e:
+        logger.error("Gemini call failed attempt %d: %s", attempt + 1, e)
+        if attempt == max_retries:
+            return None
     return None
 
 @lru_cache(maxsize=200)
@@ -113,9 +113,15 @@ def send_whatsapp_async(sender, reply):
         if attempt < max_retries - 1:
             time.sleep(2 ** attempt)
 
-@app.route("/webhook", methods=["POST"])
+@app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     try:
+        if request.method == "GET":
+        verify_token = os.getenv("VERIFY_TOKEN")
+        if request.args.get("hub.verify_token") == verify_token:
+            return request.args.get("hub.challenge")
+        return "Forbidden", 403
+        
         data = request.get_json(silent=True)
         if not data:
             return jsonify({"status": "ignored"}), 200

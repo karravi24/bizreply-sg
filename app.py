@@ -16,6 +16,8 @@ WASENDER_KEY = os.getenv("WASENDER_KEY")
 GEMINI_KEY = os.getenv("GEMINI_KEY")
 INSTANCE_ID = os.getenv("INSTANCE_ID")
 
+logger.info(f"Loaded GEMINI_KEY: {GEMINI_KEY[:8]}...")
+
 if not all([WASENDER_KEY, GEMINI_KEY, INSTANCE_ID]):
     logger.error("Missing env vars: WASENDER_KEY, GEMINI_KEY, or INSTANCE_ID")
     raise SystemExit("Set env vars before running.")

@@ -34,7 +34,7 @@ CHUNK_OVERLAP = 150
 
 
 GEMINI_KEY = os.getenv("GEMINI_KEY")
-logger.info(GEMINI_KEY)
+#logger.info(GEMINI_KEY)
 if not GEMINI_KEY:
     logger.error("CRITICAL: GEMINI_KEY is missing from environment variables!")
     raise ValueError("GEMINI_KEY must be provided for cloud embedding functions.")

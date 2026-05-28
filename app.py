@@ -116,27 +116,31 @@ def send_whatsapp_async(sender, reply):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
-        data = request.get_json(silent=True)
-        if not data:
+        payload = request.get_json()
+        if not payload:
             return jsonify({"status": "ignored"}), 200
 
-        logger.info("Webhook payload: %s", data)
+        logger.info("Webhook payload: %s", payload)
+        logger.info("Payload keys: %s", list(payload.keys()))
 
         user_msg, sender = "", ""
 
         # 1. WaSenderAPI format from WhatsApp
-        if data.get('event') == 'messages.received':
-            msg_wrapper = data.get('data', {}).get('messages', {})
+        if payload.get('event') == 'messages.received':
+            data = payload.get('data', {})
+            msg_wrapper = data.get('messages', {})
             message_content = msg_wrapper.get('message', {})
             key_data = msg_wrapper.get('key', {})
-            user_msg = message_content.get('conversation') or message_content.get('extendedTextMessage', {}).get('text', '')
+
+            user_msg = message_content.get('conversation') or \
+                       message_content.get('extendedTextMessage', {}).get('text', '')
             sender = key_data.get('cleanedSenderPn') or key_data.get('senderPn', '').split('@')[0]
 
         # 2. Local test format: {"message": "text", "sender": "123"}
-        elif 'message' in data:
-            msg = data.get('message', '')
+        elif 'message' in payload:
+            msg = payload.get('message', '')
             user_msg = msg if isinstance(msg, str) else msg.get('text', '')
-            sender = data.get('sender') or data.get('from') or "test_user"
+            sender = payload.get('sender') or payload.get('from') or "test_user"
 
         else:
             logger.warning("Unknown payload structure")
@@ -152,7 +156,7 @@ def webhook():
         documents = search_documents(query=user_msg, customer_name="beesbuzz", n_results=10)
         context = build_context(documents)
 
-        logger.info("Retrive Contex %s: %s", documents, context)
+        logger.info("Retrieved %d docs. Context: %s", len(documents), context)
 
         if not documents or not context.strip() or context == "No relevant information found.":
             reply = "I’ll check and get back to you."
@@ -164,7 +168,6 @@ def webhook():
         logger.info("Gemini reply: %s", reply)
         threading.Thread(target=send_whatsapp_async, args=(sender, reply), daemon=True).start()
 
-        logger.info(f"Incoming payload keys: {list(data.keys())}")
         return jsonify({"status": "ok"})
 
     except Exception as e:

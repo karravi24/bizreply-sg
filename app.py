@@ -165,9 +165,6 @@ def webhook():
         threading.Thread(target=send_whatsapp_async, args=(sender, reply), daemon=True).start()
 
         logger.info(f"Incoming payload keys: {list(data.keys())}")
-        logger.info(f"Extracted message: {message}")
-        logger.info(f"ChromaDB returned {len(docs)} docs")
-
         return jsonify({"status": "ok"})
 
     except Exception as e:

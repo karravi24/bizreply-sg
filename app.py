@@ -29,7 +29,7 @@ def call_gemini(system_prompt, user_msg):
         "contents": [{"parts": [{"text": f"{system_prompt}\n\nUser: {user_msg}"}]}],
         "generationConfig": {
             "temperature": 0.3,
-            "maxOutputTokens": 500
+            "maxOutputTokens": 1500
         }
     }
 
@@ -191,6 +191,6 @@ def debug_search():
 
 if __name__ == "__main__":
     # Run scan once on startup for local dev
-    scan_uploads_folder()
+    #scan_uploads_folder()
     port = int(os.getenv("PORT", 5050))
     app.run(host="0.0.0.0", port=port, debug=False)
